@@ -1,4 +1,4 @@
-# DLpisoFoam, DLbuoyantPimpleFoam, and DLpimpleFoam_auto
+# Machine Learning-Enhanced OpenFOAM CFD Solvers
 
 **Deep Learning-Enhanced CFD Solvers for Accelerated Fluid Flow Simulations**
 
