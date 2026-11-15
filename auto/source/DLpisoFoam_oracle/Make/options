@@ -1,0 +1,3 @@
+#include "../../DLpimpleFoam_oracle/Make/options"
+
+EXE_INC += -I../DLpimpleFoam_oracle

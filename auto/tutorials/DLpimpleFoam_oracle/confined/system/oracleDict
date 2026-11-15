@@ -1,0 +1,72 @@
+/*--------------------------------*- C++ -*----------------------------------*\
+  =========                 |
+  \\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox
+   \\    /   O peration     | Website:  https://openfoam.org
+    \\  /    A nd           | Version:  8
+     \\/     M anipulation  |
+\*---------------------------------------------------------------------------*/
+FoamFile
+{
+    version         2;
+    format          ascii;
+    class           dictionary;
+    object          oracleDict;
+}
+// * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
+
+integrationMode pressureForceThenReconstruct;
+
+useVelocityIncrement true;
+
+correctTurbulenceAfterInjection false;
+
+warmStartStateReconstruction true;
+
+reconstructionWarmStartFactor 1;
+
+stateReconstructionCorrectors 1;
+
+adaptiveStateReconstruction true;
+
+minStateReconstructionCorrectors 1;
+
+stateReconstructionResidualTolerance 1e-06;
+
+stateReconstructionEquationRelaxation 0.8;
+
+aitkenStateReconstruction true;
+
+aitkenMinFactor 0.2;
+
+aitkenMaxFactor 1.8;
+
+useInterpolation false;
+
+useGraphCoarsening true;
+
+graphCoarseningLevels 2;
+
+graphPressureMode ddpResidual;
+
+graphFullCoarsePrediction false;
+
+graphLinearProlongation false;
+
+graphBaselineWeightFactor 1;
+
+graphVelocityMode ddUCorrResidual;
+
+graphVelocityPreviousCorrectionWeightFactor 1;
+
+gridRes         ( 0.005 0.005 0.005 );
+
+outputWeightFactor 1;
+
+adaptivePressureCorrectors true;
+
+minPressureCorrectors 1;
+
+pressureCorrectorTolerance 0.0001;
+
+
+// ************************************************************************* //

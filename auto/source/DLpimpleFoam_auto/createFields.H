@@ -14,6 +14,17 @@ volScalarField p
     mesh
 );
 
+if (p.dimensions() != dimVelocity*dimVelocity)
+{
+    FatalErrorInFunction
+        << "DLpimpleFoam_auto requires kinematic pressure [0 2 -2 0 0 0 0], "
+        << "but field p has dimensions " << p.dimensions() << "." << nl
+        << "For a heat-transfer case with thermodynamic pressure in Pa and "
+        << "mass flux, run DLbuoyantPimpleFoam_auto instead. Do not change "
+        << "the pressure dimensions to bypass this check."
+        << exit(FatalError);
+}
+
 Info<< "Reading field U\n" << endl;
 volVectorField U
 (
@@ -30,6 +41,14 @@ volVectorField U
 
 #include "createPhi.H"
 
+if (phi.dimensions() != dimVolume/dimTime)
+{
+    FatalErrorInFunction
+        << "DLpimpleFoam_auto requires volumetric flux, but phi has dimensions "
+        << phi.dimensions() << "." << nl
+        << "Use DLbuoyantPimpleFoam_auto for heat-transfer cases with mass flux."
+        << exit(FatalError);
+}
 
 label pRefCell = 0;
 scalar pRefValue = 0.0;

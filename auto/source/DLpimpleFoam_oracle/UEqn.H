@@ -4,22 +4,32 @@ MRF.correctBoundaryVelocity(U);
 
 tmp<fvVectorMatrix> tUEqn
 (
-    fvm::ddt(U) + fvm::div(phi, U)
-  + MRF.DDt(U)
-  + turbulence->divDevSigma(U)
- ==
-    fvOptions(U)
+    oracleTwinReusePredictorMatrix
+  ? oraclePredictorUEqn
+  : tmp<fvVectorMatrix>
+    (
+        new fvVectorMatrix
+        (
+            fvm::ddt(U) + fvm::div(phi, U)
+          + MRF.DDt(U)
+          + turbulence->divDevSigma(U)
+         ==
+            fvOptions(U)
+        )
+    )
 );
 fvVectorMatrix& UEqn = tUEqn.ref();
 
-UEqn.relax();
-
-fvOptions.constrain(UEqn);
-
-if (pimple.momentumPredictor() && !oracleTwinSkipMomentumSolve)
+if (!oracleTwinReusePredictorMatrix)
 {
-    solve(UEqn == -fvc::grad(p));
+    UEqn.relax();
 
-    fvOptions.correct(U);
+    fvOptions.constrain(UEqn);
+
+    if (pimple.momentumPredictor() && !oracleTwinSkipMomentumSolve)
+    {
+        solve(UEqn == -fvc::grad(p));
+        fvOptions.correct(U);
+    }
 }
 

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+command -v foamListTimes >/dev/null || { echo 'Source the OpenFOAM environment first.' >&2; exit 1; }
+foamListTimes -rm -noZero
+rm -rf constant/polyMesh postProcessing processor[0-9]*
+rm -f 0/cellLevel 0/pointLevel 0/yPlus constant/triSurface/cylinders.stl system/blockMeshDict.background system/snappyHexMeshDict log.*
+rmdir constant/triSurface 2>/dev/null || true

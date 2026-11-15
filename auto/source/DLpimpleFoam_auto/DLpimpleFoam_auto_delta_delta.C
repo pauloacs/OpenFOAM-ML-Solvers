@@ -444,12 +444,59 @@ int main(int argc, char *argv[])
 
     Switch postSMInjectionReconstruction =
         mlDict.lookupOrDefault<Switch>("postSMInjectionReconstruction", false);
+    Switch smPostInjectionPressureCorrector =
+        mlDict.lookupOrDefault<Switch>("smPostInjectionPressureCorrector", false);
+    word smPostInjectionPressureCorrectorPosition =
+        mlDict.lookupOrDefault<word>("smPostInjectionPressureCorrectorPosition", "beforeReconstruction");
     Switch smPressureForceThenReconstruct =
         mlDict.lookupOrDefault<Switch>("smPressureForceThenReconstruct", false);
     Switch smOracleCompatibleIntegration =
         mlDict.lookupOrDefault<Switch>("smOracleCompatibleIntegration", false);
-    const scalar smOuterUResidualTolerance = mlDict.lookupOrDefault<scalar>("smOuterUResidualTolerance", 5e-4);
-    const scalar smOuterPResidualTolerance = mlDict.lookupOrDefault<scalar>("smOuterPResidualTolerance", 5e-4);
+    const dictionary& pimpleSolverDict = mesh.solutionDict().subDict("PIMPLE");
+    const auto fvSolutionOuterResidualTolerance =
+    [
+        &pimpleSolverDict
+    ]
+    (const word& fieldName, const scalar fallback) -> scalar
+    {
+        if (pimpleSolverDict.found("outerCorrectorResidualControl"))
+        {
+            const dictionary& outerResidualDict =
+                pimpleSolverDict.subDict("outerCorrectorResidualControl");
+            if (outerResidualDict.found(fieldName))
+            {
+                const entry& fieldEntry = outerResidualDict.lookupEntry(fieldName, false, false);
+                if (fieldEntry.isDict())
+                {
+                    return fieldEntry.dict().lookupOrDefault<scalar>("tolerance", fallback);
+                }
+            }
+        }
+
+        if (pimpleSolverDict.found("residualControl"))
+        {
+            const dictionary& residualDict = pimpleSolverDict.subDict("residualControl");
+            if (residualDict.found(fieldName))
+            {
+                const entry& fieldEntry = residualDict.lookupEntry(fieldName, false, false);
+                if (fieldEntry.isDict())
+                {
+                    return fieldEntry.dict().lookupOrDefault<scalar>("tolerance", fallback);
+                }
+                return readScalar(residualDict.lookup(fieldName));
+            }
+        }
+
+        return fallback;
+    };
+    const scalar fvSolutionOuterUTolerance =
+        fvSolutionOuterResidualTolerance("U", 5e-4);
+    const scalar fvSolutionOuterPTolerance =
+        fvSolutionOuterResidualTolerance("p", 5e-4);
+    const scalar smOuterUResidualTolerance =
+        mlDict.lookupOrDefault<scalar>("smOuterUResidualTolerance", fvSolutionOuterUTolerance);
+    const scalar smOuterPResidualTolerance =
+        mlDict.lookupOrDefault<scalar>("smOuterPResidualTolerance", fvSolutionOuterPTolerance);
     const bool smAdaptivePressureCorrectors = mlDict.lookupOrDefault<bool>("smAdaptivePressureCorrectors", true);
     const label smMinPressureCorrectors = mlDict.lookupOrDefault<label>("smMinPressureCorrectors", 1);
     const scalar smPressureCorrectorTolerance = mlDict.lookupOrDefault<scalar>("smPressureCorrectorTolerance", 1e-5);
@@ -515,6 +562,16 @@ int main(int argc, char *argv[])
             << "smStateReconstructionCorrectors must be nonnegative."
             << exit(FatalError);
     }
+    if (smPostInjectionPressureCorrector
+        && (!postSMInjectionReconstruction
+            || (smPostInjectionPressureCorrectorPosition != "beforeReconstruction"
+                && smPostInjectionPressureCorrectorPosition != "afterReconstruction")))
+    {
+        FatalErrorInFunction
+            << "smPostInjectionPressureCorrector requires postSMInjectionReconstruction=true and "
+            << "smPostInjectionPressureCorrectorPosition must be beforeReconstruction or afterReconstruction."
+            << exit(FatalError);
+    }
     if
     (
           postSMInjectionReconstruction && smStateReconstructionCorrectors > 0
@@ -546,6 +603,8 @@ int main(int argc, char *argv[])
         << " velocityExtrapolation=" << smUseVelocityExtrapolation
         << " velocityExtrapolationAlpha=" << smVelocityExtrapolationAlpha
         << " pressureForceThenReconstruct=" << smPressureForceThenReconstruct
+        << " postInjectionPressureCorrector=" << smPostInjectionPressureCorrector
+        << " pressureCorrectorPosition=" << smPostInjectionPressureCorrectorPosition
         << " oracleCompatible=" << smOracleCompatibleIntegration
         << " equationRelaxationSource=" << (smOracleCompatibleIntegration ? "fvSolution" : "MLSamplingDict")
         << " useInputPredictorState=" << smUseInputPredictorState
@@ -831,6 +890,9 @@ int main(int argc, char *argv[])
     scalar smPreviousCompletedDeltaT = 0.0;
     while (runTime.loop())
     {
+        // Refresh run-time adjustable timestep controls from controlDict.
+        #include "readTimeControls.H"
+
         autoPtr<pimpleControl> stepPimple;
         if (smOracleCompatibleIntegration)
         {
@@ -1155,6 +1217,44 @@ int main(int argc, char *argv[])
                         fvOptions.correct(U);
                         Info<< "[SM JOINT] no-solve HbyA pressure force before reconstruction" << nl;
                     }
+
+                    auto runPostInjectionPressureCorrector = [&]()
+                    {
+                        MRF.correctBoundaryVelocity(U);
+                        tmp<fvVectorMatrix> tUEqn
+                        (
+                            fvm::ddt(U) + fvm::div(phi, U) + MRF.DDt(U)
+                          + turbulence->divDevSigma(U) == fvOptions(U)
+                        );
+                        fvVectorMatrix& UEqn = tUEqn.ref();
+                        if (smOracleCompatibleIntegration)
+                        {
+                            UEqn.relax();
+                        }
+                        else
+                        {
+                            UEqn.relax(smStateReconstructionEquationRelaxation);
+                        }
+                        fvOptions.constrain(UEqn);
+                        const auto pressureCorrectorWallStart =
+                            std::chrono::steady_clock::now();
+                        #include "pEqn.H"
+                        stepPEqnWall += std::chrono::duration<scalar>
+                        (
+                            std::chrono::steady_clock::now() - pressureCorrectorWallStart
+                        ).count();
+                        pSM = p;
+                        Info<< "[SM POST-INJECTION pEqn] position="
+                            << smPostInjectionPressureCorrectorPosition
+                            << " completed using a fresh UEqn." << nl;
+                    };
+
+                    if (smPostInjectionPressureCorrector
+                        && smPostInjectionPressureCorrectorPosition == "beforeReconstruction")
+                    {
+                        runPostInjectionPressureCorrector();
+                    }
+
                     // Mimic the realistic oracle mode:
                     // first UEqn -> inject SM pressure only -> fixed-pressure
                     // U/phi reconstruction -> normal PIMPLE continuation.
@@ -1393,6 +1493,12 @@ int main(int argc, char *argv[])
                     else
                     {
                         Info<< "[SM RECONSTRUCTION] zero fixed-pressure correctors; no reconstruction UEqn solve." << nl;
+                    }
+
+                    if (smPostInjectionPressureCorrector
+                        && smPostInjectionPressureCorrectorPosition == "afterReconstruction")
+                    {
+                        runPostInjectionPressureCorrector();
                     }
 
                     // Exclude feature-generation and reconstruction solver

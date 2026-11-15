@@ -12,6 +12,154 @@ def _figure(rows, columns):
     return figure, figure.subplots(rows, columns, squeeze=False)
 
 
+def plot_target_z_slice(centres, fields, directory, name, z_slice=None,
+                        velocity_target_name='dU', grid_resolution=400, mesh_bounds=None,
+                        predictions=None, obstacle_points=None):
+    from scipy.spatial import cKDTree
+
+    centres = np.asarray(centres, dtype=float)
+    if centres.ndim != 2 or centres.shape[1] != 3 or len(centres) < 3 or not np.isfinite(centres).all():
+        raise ValueError('Target slice plotting requires finite cell centres with shape (n_cells, 3).')
+    if not isinstance(grid_resolution, int) or grid_resolution < 16:
+        raise ValueError('grid_resolution must be an integer of at least 16.')
+    required = ('dp', 'ddp')
+    if any(field not in fields for field in required):
+        raise ValueError(f'Target slice fields must include {required}.')
+    has_velocity = 'dU' in fields and 'velocity_target' in fields
+    if ('dU' in fields) != ('velocity_target' in fields):
+        raise ValueError('dU and velocity_target must either both be provided or both be omitted.')
+
+    if z_slice is None:
+        z_slice = .5 * (centres[:, 2].min() + centres[:, 2].max())
+    z_value = float(z_slice)
+    if not np.isfinite(z_value):
+        raise ValueError('z_slice must be finite.')
+    field_names = required + (('dU', 'velocity_target') if has_velocity else ())
+    bounds = np.asarray(mesh_bounds, dtype=float).reshape(2, 3) if mesh_bounds is not None else np.array(
+        [centres.min(axis=0), centres.max(axis=0)])
+    x_min, y_min = bounds[0, :2]
+    x_max, y_max = bounds[1, :2]
+    x_count = grid_resolution
+    y_count = max(16, int(round(grid_resolution * (y_max - y_min) / max(x_max - x_min, 1e-12))))
+    x_axis = np.linspace(x_min, x_max, x_count)
+    y_axis = np.linspace(y_min, y_max, y_count)
+    grid_x, grid_y = np.meshgrid(x_axis, y_axis)
+    queries = np.column_stack((grid_x.ravel(), grid_y.ravel(), np.full(grid_x.size, z_value)))
+    distances, neighbours = cKDTree(centres).query(queries, k=min(8, len(centres)))
+    weights = 1. / np.maximum(distances, 1e-12) ** 2
+    weights /= weights.sum(axis=1, keepdims=True)
+    solid_mask = np.zeros(grid_x.shape, dtype=bool)
+    if obstacle_points is not None and len(obstacle_points):
+        from scipy.spatial import ConvexHull
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        from matplotlib.path import Path as PolygonPath
+        boundary = np.asarray(obstacle_points, dtype=float)
+        obstacle_height = float(np.ptp(boundary[:, 2]))
+        boundary = boundary[np.abs(boundary[:, 2] - z_value) <= max(.05 * obstacle_height, 1e-8)]
+        boundary = np.unique(boundary[:, :2], axis=0)
+        if len(boundary) >= 3:
+            tree = cKDTree(boundary)
+            spacing = tree.query(boundary, k=2)[0][:, 1]
+            pairs = tree.query_pairs(max(.02 * obstacle_height, 4 * float(np.median(spacing))), output_type='ndarray')
+            adjacency = coo_matrix((np.ones(len(pairs)), (pairs[:, 0], pairs[:, 1])), shape=(len(boundary), len(boundary)))
+            _, labels = connected_components(adjacency, directed=False)
+            for label in np.unique(labels):
+                polygon = boundary[labels == label]
+                centred_polygon = polygon - polygon.mean(axis=0)
+                # Face centres on one wall can differ only by coordinate roundoff.
+                rank_tolerance = 64 * np.finfo(float).eps * max(1., float(np.max(np.abs(polygon))))
+                if len(polygon) >= 3 and np.linalg.matrix_rank(centred_polygon, tol=rank_tolerance) == 2:
+                    hull = ConvexHull(centred_polygon)
+                    solid_mask |= PolygonPath(polygon[hull.vertices]).contains_points(queries[:, :2]).reshape(grid_x.shape)
+
+    def interpolate(values):
+        values = np.asarray(values, dtype=float)
+        if values.shape[0] != len(centres) or not np.isfinite(values).all():
+            raise ValueError('Target fields must be finite and match the cell-centre count.')
+        if values.ndim == 1:
+            result = np.sum(weights * values[neighbours], axis=1).reshape(grid_x.shape)
+        else:
+            result = np.sum(weights[..., None] * values[neighbours], axis=1).reshape(grid_x.shape + values.shape[1:])
+        result[solid_mask] = np.nan
+        return result
+
+    grids = {field: interpolate(fields[field]) for field in field_names}
+    prediction_grids = None if predictions is None else {field: interpolate(predictions[field]) for field in field_names}
+    if prediction_grids is not None:
+        figure, axes = _figure(len(field_names), 3)
+        for row, field in enumerate(field_names):
+            target = grids[field]
+            prediction = prediction_grids[field]
+            vector = target.ndim == 3
+            target_image = np.linalg.norm(target, axis=-1) if vector else target
+            prediction_image = np.linalg.norm(prediction, axis=-1) if vector else prediction
+            error = np.linalg.norm(prediction - target, axis=-1) if vector else prediction - target
+            limit = max(float(np.nanmax(np.abs([target_image, prediction_image]))), 1e-12)
+            error_limit = max(float(np.nanmax(np.abs(error))), 1e-12)
+            label = velocity_target_name if field == 'velocity_target' else field
+            for column, (values, title) in enumerate(((target_image, 'Target'), (prediction_image, 'Prediction'),
+                                                     (error, 'Vector error norm' if vector else 'Signed error'))):
+                axis = axes[row, column]
+                upper = error_limit if column == 2 else limit
+                image = axis.imshow(values, origin='lower', extent=(x_min, x_max, y_min, y_max),
+                                    aspect='equal', interpolation='nearest', cmap='viridis' if vector else 'RdBu_r',
+                                    vmin=0. if vector else -upper, vmax=upper)
+                axis.set(title=f'{label}: {title}', xlabel='x (m)', ylabel='y (m)')
+                figure.colorbar(image, ax=axis, label='m/s' if vector else 'm^2/s^2')
+        figure.suptitle(f'{name} | z={z_value:g} m | native mesh before CFD reconstruction')
+        directory = Path(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+        image_path = directory / f'{name}_prediction_z.png'
+        arrays_path = directory / f'{name}_prediction_z.npz'
+        figure.savefig(image_path, dpi=140)
+        np.savez_compressed(arrays_path, x=x_axis, y=y_axis, z_slice=z_value,
+                            velocity_target_name=velocity_target_name, solid_mask=solid_mask, **grids,
+                            **{f'prediction_{field}': values for field, values in prediction_grids.items()})
+        return image_path, arrays_path
+    figure, axes = _figure(2 if has_velocity else 1, 2)
+    pressure_specs = (
+        ('dp', 'Target dp', 'm^2/s^2'),
+        ('ddp', 'Target ddp', 'm^2/s^2'),
+    )
+    for axis, (field, title, unit) in zip(axes[0], pressure_specs):
+        pressure_limit = max(float(np.nanpercentile(np.abs(grids[field]), 99.5)), 1e-12)
+        image = axis.imshow(np.ma.masked_invalid(grids[field]), origin='lower', extent=(x_min, x_max, y_min, y_max),
+                            aspect='equal', interpolation='nearest', cmap='RdBu_r',
+                            vmin=-pressure_limit, vmax=pressure_limit)
+        axis.set(title=title, xlabel='x (m)', ylabel='y (m)')
+        figure.colorbar(image, ax=axis, label=unit, shrink=.85)
+    if has_velocity:
+        dU_limit = max(float(np.nanpercentile(np.linalg.norm(grids['dU'], axis=-1), 99.5)), 1e-12)
+        target_grid = grids['velocity_target']
+        target_limit = max(float(np.nanpercentile(np.linalg.norm(target_grid, axis=-1), 99.5)), 1e-12)
+        for axis, vector, limit, title in (
+                (axes[1, 0], grids['dU'], dU_limit, '|dU| target'),
+                (axes[1, 1], target_grid, target_limit, f'|{velocity_target_name}| target')):
+            magnitude = np.linalg.norm(vector, axis=-1)
+            image = axis.imshow(np.ma.masked_invalid(magnitude), origin='lower', extent=(x_min, x_max, y_min, y_max),
+                                aspect='equal', interpolation='nearest', cmap='viridis', vmin=0., vmax=limit)
+            stride = max(1, grid_resolution // 24)
+            u = np.ma.masked_invalid(vector[::stride, ::stride, 0])
+            v = np.ma.masked_invalid(vector[::stride, ::stride, 1])
+            axis.quiver(grid_x[::stride, ::stride], grid_y[::stride, ::stride], u, v,
+                        color='black', alpha=.65, angles='xy', scale_units='xy', scale=None, width=.002)
+            axis.set(title=title + ' with in-plane components', xlabel='x (m)', ylabel='y (m)')
+            figure.colorbar(image, ax=axis, label='m/s', shrink=.85)
+    figure.suptitle(f'{name} | target slice z={z_value:.6g} m | interpolated cell-centre fields')
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    image_path = directory / f'{name}_targets_z.png'
+    arrays_path = directory / f'{name}_targets_z.npz'
+    figure.savefig(image_path, dpi=140)
+    arrays = dict(x=x_axis, y=y_axis, z_slice=z_value, solid_mask=solid_mask, dp=grids['dp'], ddp=grids['ddp'])
+    if has_velocity:
+        arrays.update(dU=grids['dU'], velocity_target=grids['velocity_target'],
+                      velocity_target_name=np.asarray(velocity_target_name))
+    np.savez_compressed(arrays_path, **arrays)
+    return image_path, arrays_path
+
+
 def plot_loss(history, directory):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)

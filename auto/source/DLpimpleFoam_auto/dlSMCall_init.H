@@ -65,19 +65,56 @@ array_3d_init = nullptr;
 
 int num_cells = mesh.cells().size();
 
-label z_top_patchID = mesh.boundaryMesh().findPatchID("top");
+Foam::IOdictionary samplingDict
+(
+    Foam::IOobject
+    (
+        "MLSamplingDict",
+        mesh.time().system(),
+        mesh,
+        Foam::IOobject::MUST_READ,
+        Foam::IOobject::NO_WRITE
+    )
+);
+
+Foam::word zTopPatchName("top");
+Foam::word zBottomPatchName("bot");
+Foam::word yFrontPatchName("front");
+Foam::word yBackPatchName("back");
+Foam::word obstaclePatchName("obstacle");
+
+if (samplingDict.found("surrogateBoundaryPatches"))
+{
+    const Foam::dictionary& patchNames = samplingDict.subDict("surrogateBoundaryPatches");
+    zTopPatchName = patchNames.lookupOrDefault<Foam::word>("zTop", zTopPatchName);
+    zBottomPatchName = patchNames.lookupOrDefault<Foam::word>("zBottom", zBottomPatchName);
+    yFrontPatchName = patchNames.lookupOrDefault<Foam::word>("yFront", yFrontPatchName);
+    yBackPatchName = patchNames.lookupOrDefault<Foam::word>("yBack", yBackPatchName);
+    obstaclePatchName = patchNames.lookupOrDefault<Foam::word>("obstacle", obstaclePatchName);
+}
+
+label z_top_patchID = mesh.boundaryMesh().findPatchID(zTopPatchName);
+label z_bot_patchID = mesh.boundaryMesh().findPatchID(zBottomPatchName);
+label y_bot_patchID = mesh.boundaryMesh().findPatchID(yFrontPatchName);
+label y_top_patchID = mesh.boundaryMesh().findPatchID(yBackPatchName);
+label obst_patchID = mesh.boundaryMesh().findPatchID(obstaclePatchName);
+
+if (z_top_patchID < 0 || z_bot_patchID < 0 || y_bot_patchID < 0
+    || y_top_patchID < 0 || obst_patchID < 0)
+{
+    FatalErrorInFunction
+        << "Configured surrogate boundary patch was not found. Expected names: "
+        << "zTop=" << zTopPatchName << ", zBottom=" << zBottomPatchName
+        << ", yFront=" << yFrontPatchName << ", yBack=" << yBackPatchName
+        << ", obstacle=" << obstaclePatchName << ". Check "
+        << mesh.time().system() / "MLSamplingDict" << " and the mesh boundary."
+        << exit(FatalError);
+}
+
 int num_cells_z_top = p.boundaryField()[z_top_patchID].size();
-
-label z_bot_patchID = mesh.boundaryMesh().findPatchID("bot");
 int num_cells_z_bot = p.boundaryField()[z_bot_patchID].size();
-
-label y_bot_patchID = mesh.boundaryMesh().findPatchID("front");
 int num_cells_y_bot = p.boundaryField()[y_bot_patchID].size();
-
-label y_top_patchID = mesh.boundaryMesh().findPatchID("back");
 int num_cells_y_top = p.boundaryField()[y_top_patchID].size();
-
-label obst_patchID = mesh.boundaryMesh().findPatchID("obstacle");
 int num_cells_obstacle = p.boundaryField()[obst_patchID].size();
 
 const int row = num_cells;

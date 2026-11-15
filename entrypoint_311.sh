@@ -47,6 +47,11 @@ cd /home/repo/auto/source/DLpimpleFoam_auto
 wclean
 wmake
 
+echo "Installing DLbuoyantPimpleFoam_auto"
+cd /home/repo/auto/source/DLbuoyantPimpleFoam_auto
+wclean
+wmake
+
 echo "Installing DLpimpleFoam_oracle"
 cd /home/repo/auto/source/DLpimpleFoam_oracle
 wclean
