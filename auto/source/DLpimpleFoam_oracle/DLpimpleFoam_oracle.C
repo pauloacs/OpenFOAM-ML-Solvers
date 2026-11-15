@@ -26,7 +26,8 @@
 //   gridRes           (dx dy dz);
 //   stateReconstructionCorrectors 0 | positive integer;
 //   adaptiveStateReconstruction true | false;
-//   minStateReconstructionCorrectors positive integer;
+//   minStateReconstructionCorrectors non-negative; zero is valid when the
+//       state reconstruction corrector count is zero;
 //   stateReconstructionResidualTolerance positive scalar;
 //   stateReconstructionEquationRelaxation scalar in (0, 1];
 //   aitkenStateReconstruction true | false;
@@ -40,6 +41,7 @@
 #include "fvOptions.H"
 #include "fvcSmooth.H"
 #include "OracleGrid.H"
+#include "OracleGraph.H"
 #include "Residuals.H"
 
 #include <chrono>
@@ -166,14 +168,172 @@ int main(int argc, char *argv[])
         "integrationMode",
         "frozenPressureEquation"
     );
+    const bool oraclePisoMode =
+        oracleDict.lookupOrDefault<bool>
+        (
+            "oraclePisoMode",
+            args.executable() == "DLpisoFoam_oracle"
+        );
     const bool oracleUseInterpolation =
         oracleDict.lookupOrDefault<bool>("useInterpolation", false);
+    const bool oracleUseGraphCoarsening =
+        oracleDict.lookupOrDefault<bool>("useGraphCoarsening", false);
+    const bool oracleGraphLinearProlongation =
+        oracleDict.lookupOrDefault<bool>("graphLinearProlongation", false);
+    const label oracleGraphCoarseningLevels = oracleDict.lookupOrDefault<label>
+    (
+        "graphCoarseningLevels",
+        2
+    );
+    word oracleGraphPressureMode = oracleDict.lookupOrDefault<word>
+    (
+        "graphPressureMode",
+        "ddpResidual"
+    );
+    const bool oracleGraphFullCoarsePrediction =
+        oracleDict.lookupOrDefault<bool>
+        (
+            "graphFullCoarsePrediction",
+            oracleGraphPressureMode == "dp"
+        );
+    if (oracleDict.found("graphFullCoarsePrediction"))
+    {
+        oracleGraphPressureMode = oracleGraphFullCoarsePrediction
+            ? word("dp")
+            : word("ddpResidual");
+    }
+    const word oracleGraphVelocityMode = oracleDict.lookupOrDefault<word>
+    (
+        "graphVelocityMode",
+        "dU"
+    );
+    const scalar oracleGraphBaselineWeightFactor =
+        oracleDict.lookupOrDefault<scalar>("graphBaselineWeightFactor", 1.0);
+    const scalar oracleGraphVelocityPreviousCorrectionWeightFactor =
+        oracleDict.lookupOrDefault<scalar>
+        (
+            "graphVelocityPreviousCorrectionWeightFactor",
+            1.0
+        );
     const bool oracleUseVelocityIncrement =
         oracleDict.lookupOrDefault<bool>("useVelocityIncrement", false);
+    const bool oracleCorrectTurbulenceAfterInjection =
+        oracleDict.lookupOrDefault<bool>("correctTurbulenceAfterInjection", false);
+    const bool oracleWarmStartStateReconstruction =
+        oracleDict.lookupOrDefault<bool>("warmStartStateReconstruction", false);
+    const scalar oracleReconstructionWarmStartFactor =
+        oracleDict.lookupOrDefault<scalar>("reconstructionWarmStartFactor", 1.0);
     const vector oracleGridRes =
         oracleDict.lookupOrDefault<vector>("gridRes", vector(0.05, 0.05, 0.05));
     const scalar oracleOutputWeightFactor =
         oracleDict.lookupOrDefault<scalar>("outputWeightFactor", 1.0);
+    if
+    (
+        oracleGraphVelocityMode != "dU"
+     && oracleGraphVelocityMode != "ddUCorrResidual"
+    )
+    {
+        FatalErrorInFunction
+            << "graphVelocityMode must be dU or ddUCorrResidual."
+            << exit(FatalError);
+    }
+    if (!std::isfinite(oracleGraphVelocityPreviousCorrectionWeightFactor))
+    {
+        FatalErrorInFunction
+            << "graphVelocityPreviousCorrectionWeightFactor must be finite."
+            << exit(FatalError);
+    }
+    if
+    (
+        oracleGraphVelocityMode == "ddUCorrResidual"
+     &&
+        (
+            !oracleUseGraphCoarsening
+         || !oracleUseVelocityIncrement
+         || oracleIntegrationMode != "pressureForceThenReconstruct"
+        )
+    )
+    {
+        FatalErrorInFunction
+            << "graphVelocityMode ddUCorrResidual requires "
+            << "useGraphCoarsening true, useVelocityIncrement true, and "
+            << "integrationMode pressureForceThenReconstruct."
+            << exit(FatalError);
+    }
+    labelList oracleGraphMapping;
+    label oracleGraphCoarseCount = 0;
+    autoPtr<OracleGraphLinearTransfer> oracleGraphLinearTransfer;
+    if (oracleUseGraphCoarsening)
+    {
+        if (oracleUseInterpolation)
+        {
+            FatalErrorInFunction
+                << "useGraphCoarsening and useInterpolation cannot both be true."
+                << exit(FatalError);
+        }
+        if (Pstream::parRun())
+        {
+            FatalErrorInFunction
+                << "Graph mapping round trips currently require a serial run."
+                << exit(FatalError);
+        }
+        if
+        (
+            oracleGraphPressureMode != "dp"
+         && oracleGraphPressureMode != "ddpResidual"
+        )
+        {
+            FatalErrorInFunction
+                << "graphPressureMode must be dp or ddpResidual."
+                << exit(FatalError);
+        }
+        if (!std::isfinite(oracleGraphBaselineWeightFactor))
+        {
+            FatalErrorInFunction
+                << "graphBaselineWeightFactor must be finite."
+                << exit(FatalError);
+        }
+        if (oracleGraphCoarseningLevels < 0)
+        {
+            FatalErrorInFunction
+                << "graphCoarseningLevels must be non-negative."
+                << exit(FatalError);
+        }
+
+        oracleGraphMapping = oracleGraphCoarsen
+        (
+            mesh,
+            oracleGraphCoarseningLevels,
+            oracleGraphCoarseCount
+        );
+        if (oracleGraphLinearProlongation)
+        {
+            oracleGraphLinearTransfer.reset
+            (
+                new OracleGraphLinearTransfer
+                (
+                    mesh,
+                    oracleGraphMapping,
+                    oracleGraphCoarseCount
+                )
+            );
+        }
+        Info<< "[ORACLE GRAPH] native cells=" << mesh.nCells()
+            << " coarse nodes=" << oracleGraphCoarseCount
+            << " levels=" << oracleGraphCoarseningLevels
+            << " pressure mode=" << oracleGraphPressureMode
+            << " full coarse prediction="
+            << oracleGraphFullCoarsePrediction
+                << " linear pressure prolongation="
+                << oracleGraphLinearProlongation
+            << " velocity mode=" << oracleGraphVelocityMode << nl;
+    }
+            else if (oracleGraphLinearProlongation)
+            {
+            FatalErrorInFunction
+                << "graphLinearProlongation requires useGraphCoarsening true."
+                << exit(FatalError);
+            }
     const label oracleStateReconstructionCorrectors =
         oracleDict.lookupOrDefault<label>
         (
@@ -266,7 +426,41 @@ int main(int argc, char *argv[])
 
     if
     (
+        oraclePisoMode
+     &&
+        (
+            oracleIntegrationMode != "pressureForceThenReconstruct"
+         || oracleStateReconstructionCorrectors != 0
+         || mesh.solutionDict().subDict("PIMPLE").lookupOrDefault<label>
+            (
+                "nOuterCorrectors", 1
+            ) != 1
+        )
+    )
+    {
+        FatalErrorInFunction
+            << "oraclePisoMode requires pressureForceThenReconstruct, "
+            << "stateReconstructionCorrectors 0, and nOuterCorrectors 1."
+            << exit(FatalError);
+    }
+
+    if (oraclePisoMode && oracleWarmStartStateReconstruction)
+    {
+        Info<< "[ORACLE TWIN] PISO direct injection skips reconstruction "
+            << "warm start" << nl;
+    }
+
+    if (oracleMinStateReconstructionCorrectors < 0)
+    {
+        FatalErrorInFunction
+            << "system/oracleDict: minStateReconstructionCorrectors must be "
+            << "non-negative." << exit(FatalError);
+    }
+
+    if
+    (
           oracleAdaptiveStateReconstruction
+      && oracleStateReconstructionCorrectors > 0
       &&
           (
                 oracleMinStateReconstructionCorrectors < 1
@@ -326,11 +520,51 @@ int main(int argc, char *argv[])
             << "directPressureForceCorrection, and "
             << "pressureForceThenReconstruct." << exit(FatalError);
     }
+    if
+    (
+        oracleCorrectTurbulenceAfterInjection
+     && oracleIntegrationMode != "pressureForceThenReconstruct"
+    )
+    {
+        FatalErrorInFunction
+            << "correctTurbulenceAfterInjection requires "
+            << "integrationMode pressureForceThenReconstruct."
+            << exit(FatalError);
+    }
+    if
+    (
+        oracleWarmStartStateReconstruction
+     && oracleIntegrationMode != "pressureForceThenReconstruct"
+    )
+    {
+        FatalErrorInFunction
+            << "warmStartStateReconstruction requires "
+            << "integrationMode pressureForceThenReconstruct."
+            << exit(FatalError);
+    }
+    if
+    (
+        !std::isfinite(oracleReconstructionWarmStartFactor)
+     || oracleReconstructionWarmStartFactor < 0
+     || oracleReconstructionWarmStartFactor > 2
+    )
+    {
+        FatalErrorInFunction
+            << "reconstructionWarmStartFactor must be finite and in [0, 2]."
+            << exit(FatalError);
+    }
 
     Info<< "[ORACLE TWIN] oracle=dp_final"
         << " integrationMode=" << oracleIntegrationMode
+        << " oraclePisoMode=" << oraclePisoMode
         << " useInterpolation=" << oracleUseInterpolation
         << " useVelocityIncrement=" << oracleUseVelocityIncrement
+        << " correctTurbulenceAfterInjection="
+        << oracleCorrectTurbulenceAfterInjection
+        << " warmStartStateReconstruction="
+        << oracleWarmStartStateReconstruction
+        << " reconstructionWarmStartFactor="
+        << oracleReconstructionWarmStartFactor
         << " gridRes=" << oracleGridRes
         << " outputWeightFactor=" << oracleOutputWeightFactor
         << " stateReconstructionCorrectors="
@@ -366,6 +600,42 @@ int main(int argc, char *argv[])
 
     volScalarField pPost(IOobject("oracleTwinPPost", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE), p);
     volVectorField UPost(IOobject("oracleTwinUPost", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE), U);
+    volVectorField oracleUStarTruth
+    (
+        IOobject("oracleUStarTruth", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE),
+        U
+    );
+    volVectorField oracleDUCorrPrevTruth
+    (
+        IOobject
+        (
+            "oracleDUCorrPrevTruth",
+            runTime.timeName(),
+            mesh,
+            (
+                runTime.timeIndex() == 0
+             || oracleGraphVelocityMode != "ddUCorrResidual"
+            )
+                ? IOobject::READ_IF_PRESENT
+                : IOobject::MUST_READ,
+            IOobject::AUTO_WRITE
+        ),
+        mesh,
+        dimensionedVector("oracleDUCorrPrevTruth", U.dimensions(), vector::zero)
+    );
+    volVectorField oracleDDUCorrTruth
+    (
+        IOobject
+        (
+            "oracleDDUCorrTruth",
+            runTime.timeName(),
+            mesh,
+            IOobject::NO_READ,
+            IOobject::AUTO_WRITE
+        ),
+        mesh,
+        dimensionedVector("oracleDDUCorrTruth", U.dimensions(), vector::zero)
+    );
     surfaceScalarField phiPost(IOobject("oracleTwinPhiPost", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE), phi);
     volScalarField kPost(IOobject("oracleTwinKPost", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE), oracleTwinK);
     volScalarField omegaPost(IOobject("oracleTwinOmegaPost", runTime.timeName(), mesh, IOobject::NO_READ, IOobject::NO_WRITE), oracleTwinOmega);
@@ -378,6 +648,8 @@ int main(int argc, char *argv[])
     label oracleTwinPassFirstIterations = 0;
     bool oracleTwinReconstructionSolve = false;
     bool oracleTwinSkipMomentumSolve = false;
+    bool oracleTwinReusePredictorMatrix = false;
+    tmp<fvVectorMatrix> oraclePredictorUEqn;
 
     scalar cumulativeReferenceWallTime = 0.0;
     scalar cumulativeOracleWallTime = 0.0;
@@ -406,6 +678,7 @@ int main(int argc, char *argv[])
         // Snapshot PRE state so pass 2 can be rewound to the same start.
         pPre = p; UPre = U; phiPre = phi;
         kPre = oracleTwinK; omegaPre = oracleTwinOmega; nutPre = oracleTwinNut;
+        oracleUStarTruth = UPre;
 
         // ================= PASS 1: REFERENCE (truth) =================
         oracleTwinPassTotalPIterations = 0;
@@ -595,20 +868,29 @@ int main(int argc, char *argv[])
         pPost = p; UPost = U; phiPost = phi;
         kPost = oracleTwinK; omegaPost = oracleTwinOmega; nutPost = oracleTwinNut;
 
-        // Perfect dU oracle from the same reference timestep. Apply the same
-        // optional coarse-grid round trip and blend factor as for dp.
-        oracleVelocityIncrement = UPost - UPre;
-
-        if (oracleUseInterpolation)
+        if (oracleIntegrationMode != "pressureForceThenReconstruct")
         {
-            oracleVelocityIncrement = oracleVectorGridRoundTrip
-            (
-                oracleVelocityIncrement,
-                oracleGridRes
-            );
+            oracleVelocityIncrement = UPost - UPre;
+            if (oracleUseGraphCoarsening)
+            {
+                oracleGraphRoundTrip
+                (
+                    oracleVelocityIncrement.primitiveFieldRef(),
+                    oracleGraphMapping,
+                    mesh.V(),
+                    oracleGraphCoarseCount
+                );
+            }
+            else if (oracleUseInterpolation)
+            {
+                oracleVelocityIncrement = oracleVectorGridRoundTrip
+                (
+                    oracleVelocityIncrement,
+                    oracleGridRes
+                );
+            }
+            oracleVelocityIncrement *= oracleOutputWeightFactor;
         }
-
-        oracleVelocityIncrement *= oracleOutputWeightFactor;
 
         // Rewind to the start of this timestep for the oracle pass.
         p = pPre; U = UPre; phi = phiPre;
@@ -625,25 +907,83 @@ int main(int argc, char *argv[])
 
         oraclePressureIncrement = pOracleGuess - p_prevTime;
 
-        if (oracleUseInterpolation)
+        if (oracleUseGraphCoarsening)
+        {
+            if (oracleGraphPressureMode == "ddpResidual")
+            {
+                scalarField projectedDdp(ddpTruth.primitiveField());
+                if (oracleGraphLinearProlongation)
+                {
+                    oracleGraphLinearTransfer->linearRoundTrip(projectedDdp);
+                }
+                else
+                {
+                    oracleGraphRoundTrip
+                    (
+                        projectedDdp,
+                        oracleGraphMapping,
+                        mesh.V(),
+                        oracleGraphCoarseCount
+                    );
+                }
+                forAll(oraclePressureIncrement, celli)
+                {
+                    oraclePressureIncrement[celli] =
+                        oracleGraphBaselineWeightFactor*dpPrevTime[celli]
+                      + oracleOutputWeightFactor*projectedDdp[celli];
+                }
+            }
+            else
+            {
+                if (oracleGraphLinearProlongation)
+                {
+                    oracleGraphLinearTransfer->linearRoundTrip
+                    (
+                        oraclePressureIncrement.primitiveFieldRef()
+                    );
+                }
+                else
+                {
+                    oracleGraphRoundTrip
+                    (
+                        oraclePressureIncrement.primitiveFieldRef(),
+                        oracleGraphMapping,
+                        mesh.V(),
+                        oracleGraphCoarseCount
+                    );
+                }
+                oraclePressureIncrement *= oracleOutputWeightFactor;
+            }
+        }
+        else if (oracleUseInterpolation)
         {
             oraclePressureIncrement = oracleGridRoundTrip
             (
                 oraclePressureIncrement,
                 oracleGridRes
             );
+            oraclePressureIncrement *= oracleOutputWeightFactor;
         }
-
-        oraclePressureIncrement *= oracleOutputWeightFactor;
+        else
+        {
+            oraclePressureIncrement *= oracleOutputWeightFactor;
+        }
         pOracleGuess = p_prevTime + oraclePressureIncrement;
 
         Info<< "[ORACLE TWIN] reconstruction pressure input="
-            << (oracleUseInterpolation ? "interpolatedDp" : "fullResolutionDp")
+            << (oracleUseGraphCoarsening
+                ? (oracleGraphPressureMode == "ddpResidual"
+                    ? "graphCoarseDdpResidual" : "graphCoarseDp")
+                : (oracleUseInterpolation ? "interpolatedDp" : "fullResolutionDp"))
             << " weightedDpMax="
             << gMax(mag(oraclePressureIncrement.internalField().field()))
             << nl;
 
-        if (oracleUseVelocityIncrement)
+        if
+        (
+            oracleUseVelocityIncrement
+         && oracleIntegrationMode != "pressureForceThenReconstruct"
+        )
         {
             U = UPre + oracleVelocityIncrement;
             U.correctBoundaryConditions();
@@ -670,7 +1010,7 @@ int main(int argc, char *argv[])
                    )
                 << nl;
         }
-        else
+        else if (!oracleUseVelocityIncrement)
         {
             Info<< "[ORACLE TWIN] pressure-only oracle enabled" << nl;
         }
@@ -686,17 +1026,133 @@ int main(int argc, char *argv[])
         scalar oracleUEqnWallTime = 0.0;
         scalar oraclePEqnWallTime = 0.0;
         scalar oracleKOmegaWallTime = 0.0;
+        scalar oraclePostInjectionTurbulenceWallTime = 0.0;
         {
             bool oracleGuessInjected = false;
             pimpleControl pimple(mesh);
 
+            if (oracleIntegrationMode == "pressureForceThenReconstruct")
+            {
+                if (!oraclePisoMode && !pimple.loop())
+                {
+                    FatalErrorInFunction
+                        << "PIMPLE did not provide the oracle predictor iteration."
+                        << exit(FatalError);
+                }
+
+                if (oraclePisoMode)
+                {
+                    Info<< "[ORACLE TWIN] PISO mode: predictor does not "
+                        << "consume a configured outer correction" << nl;
+                }
+
+                // In PIMPLE mode the predictor owns the first outer loop.
+                // In PISO mode it only gathers features before the correction
+                // loop, leaving all configured inner correctors available.
+                p = p_prevTime + dpPrevTime;
+                U = UPre;
+                phi = phiPre;
+                const label firstPredictorUSolve =
+                    oracleTwinResidualCount<vector>(mesh, U.name());
+                const std::chrono::steady_clock::time_point
+                    predictorUEqnWallStart =
+                        std::chrono::steady_clock::now();
+                {
+                    #include "UEqn.H"
+                    if (oraclePisoMode)
+                    {
+                        oraclePredictorUEqn = tUEqn;
+                    }
+                }
+                oracleUEqnWallTime += std::chrono::duration<scalar>
+                (
+                    std::chrono::steady_clock::now() - predictorUEqnWallStart
+                ).count();
+                oracleUStarTruth = U;
+                const scalar predictorResidual =
+                    oracleTwinFirstResidualSince<vector>
+                    (
+                        mesh,
+                        U.name(),
+                        firstPredictorUSolve
+                    );
+
+                if (oracleGraphVelocityMode == "ddUCorrResidual")
+                {
+                    oracleDDUCorrTruth = UPost - oracleUStarTruth
+                                      - oracleDUCorrPrevTruth;
+                    oracleGraphRoundTrip
+                    (
+                        oracleDDUCorrTruth.primitiveFieldRef(),
+                        oracleGraphMapping,
+                        mesh.V(),
+                        oracleGraphCoarseCount
+                    );
+                    oracleVelocityIncrement =
+                        oracleUStarTruth - UPre
+                      + oracleGraphVelocityPreviousCorrectionWeightFactor
+                       *oracleDUCorrPrevTruth
+                      + oracleOutputWeightFactor*oracleDDUCorrTruth;
+                    oracleDUCorrPrevTruth = UPost - oracleUStarTruth;
+                }
+                else
+                {
+                    oracleVelocityIncrement = UPost - UPre;
+                    if (oracleUseGraphCoarsening)
+                    {
+                        oracleGraphRoundTrip
+                        (
+                            oracleVelocityIncrement.primitiveFieldRef(),
+                            oracleGraphMapping,
+                            mesh.V(),
+                            oracleGraphCoarseCount
+                        );
+                    }
+                    else if (oracleUseInterpolation)
+                    {
+                        oracleVelocityIncrement = oracleVectorGridRoundTrip
+                        (
+                            oracleVelocityIncrement,
+                            oracleGridRes
+                        );
+                    }
+                    oracleVelocityIncrement *= oracleOutputWeightFactor;
+                }
+
+                p = pOracleGuess;
+                if (oracleUseVelocityIncrement)
+                {
+                    U = UPre + oracleVelocityIncrement;
+                    U.correctBoundaryConditions();
+                    fvOptions.correct(U);
+                    phi = fvc::flux(U);
+                    MRF.makeRelative(phi);
+                    if (p.needReference())
+                    {
+                        fvc::makeRelative(phi, U);
+                        adjustPhi(phi, U, p);
+                        fvc::makeAbsolute(phi, U);
+                    }
+                }
+                oracleGuessInjected = true;
+                Info<< "[ORACLE TWIN] predictor inputs captured; UStar "
+                    << "captured, oracle injected before reconstruction; "
+                    << "predictorUResidual="
+                    << predictorResidual << nl;
+            }
+
             if
             (
-                (
-                    oracleIntegrationMode == "rerunUEqnWithOraclePressure"
-                 || oracleIntegrationMode == "pressureForceThenReconstruct"
+                     !oraclePisoMode
+                 &&
+                     (
+                          oracleIntegrationMode == "pressureForceThenReconstruct"
+             ||
+                          (
+                                oracleIntegrationMode == "rerunUEqnWithOraclePressure"
+                            && oracleStateReconstructionCorrectors > 0
+                          )
                 )
-             && oracleStateReconstructionCorrectors > 0
             )
             {
                 const std::chrono::steady_clock::time_point
@@ -748,6 +1204,7 @@ int main(int argc, char *argv[])
                         rAUForce,
                         MRF
                     );
+                    p.correctBoundaryConditions();
 
                     fvScalarMatrix pEqnForce
                     (
@@ -774,6 +1231,48 @@ int main(int argc, char *argv[])
                 scalar reconstructionResidual = GREAT;
                 scalar aitkenFactor = 1.1;
                 bool havePreviousReconstructionDelta = false;
+                const volVectorField reconstructionWarmStartBaseU
+                (
+                    IOobject
+                    (
+                        "oracleReconstructionWarmStartBaseU",
+                        runTime.timeName(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::NO_WRITE,
+                        false
+                    ),
+                    U
+                );
+                const surfaceScalarField reconstructionWarmStartBasePhi
+                (
+                    IOobject
+                    (
+                        "oracleReconstructionWarmStartBasePhi",
+                        runTime.timeName(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::NO_WRITE,
+                        false
+                    ),
+                    phi
+                );
+                if
+                (
+                    oracleWarmStartStateReconstruction
+                 && oracleReconstructionWarmStartFactor > 0
+                )
+                {
+                    U += oracleReconstructionWarmStartFactor
+                       *oracleReconstructionWarmStartU;
+                    phi += oracleReconstructionWarmStartFactor
+                         *oracleReconstructionWarmStartPhi;
+                    U.correctBoundaryConditions();
+                    fvOptions.correct(U);
+                    Info<< "[ORACLE TWIN] applied previous-step "
+                        << "reconstruction warm start factor="
+                        << oracleReconstructionWarmStartFactor << nl;
+                }
                 volVectorField reconstructionUBefore
                 (
                     IOobject
@@ -873,6 +1372,7 @@ int main(int argc, char *argv[])
                         rAUReconstruct,
                         MRF
                     );
+                    p.correctBoundaryConditions();
 
                     fvScalarMatrix pEqnReconstruct
                     (
@@ -982,12 +1482,40 @@ int main(int argc, char *argv[])
                     << " fixed-pressure correctors"
                     << " finalUResidual=" << reconstructionResidual << nl;
 
+                if (oracleWarmStartStateReconstruction)
+                {
+                    oracleReconstructionWarmStartU =
+                        U - reconstructionWarmStartBaseU;
+                    oracleReconstructionWarmStartPhi =
+                        phi - reconstructionWarmStartBasePhi;
+                    Info<< "[ORACLE TWIN] stored reconstruction warm start "
+                        << "for next timestep" << nl;
+                }
+
                                 reconstructionWallTime = std::chrono::duration<scalar>
                                 (
                                         std::chrono::steady_clock::now()
                                     - reconstructionWallStart
                                 ).count();
             }
+
+                            if (oracleCorrectTurbulenceAfterInjection)
+                            {
+                                const std::chrono::steady_clock::time_point
+                                    postInjectionTurbulenceStart =
+                                        std::chrono::steady_clock::now();
+                                laminarTransport.correct();
+                                turbulence->correct();
+                                oraclePostInjectionTurbulenceWallTime =
+                                    std::chrono::duration<scalar>
+                                    (
+                                        std::chrono::steady_clock::now()
+                                      - postInjectionTurbulenceStart
+                                    ).count();
+                                Info<< "[ORACLE TWIN] early turbulence correction after "
+                                    << "injection wall="
+                                    << oraclePostInjectionTurbulenceWallTime << " s" << nl;
+                            }
 
             // Exclude reconstruction U records so measured residual control
             // starts from the first oracle PIMPLE correction.
@@ -1021,7 +1549,9 @@ int main(int argc, char *argv[])
                 const std::chrono::steady_clock::time_point uEqnWallStart =
                     std::chrono::steady_clock::now();
 
+                oracleTwinReusePredictorMatrix = oraclePisoMode;
                 #include "UEqn.H"
+                oracleTwinReusePredictorMatrix = false;
 
                 oracleUEqnWallTime += std::chrono::duration<scalar>
                 (
@@ -1273,6 +1803,8 @@ int main(int argc, char *argv[])
                 << " UEqn=" << oracleUEqnWallTime << " s"
                 << " pEqns=" << oraclePEqnWallTime << " s"
                 << " kOmega=" << oracleKOmegaWallTime << " s"
+                << " postInjectionTurbulence="
+                << oraclePostInjectionTurbulenceWallTime << " s"
                 << " pimpleOther=" << oraclePimpleOtherWallTime << " s"
                 << " reconstruction=" << reconstructionWallTime << " s"
                 << " pimpleTotal=" << oraclePimpleWallTime << " s"

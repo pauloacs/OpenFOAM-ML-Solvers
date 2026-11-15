@@ -3,7 +3,8 @@ from pathlib import Path
 import numpy as np
 from foamlib import FoamFile
 
-from .mesh_graph import coarsen_graph, mesh_signature, restrict
+from .mesh_graph import (coarsen_graph, mesh_signature, protected_cells_from_regions, restrict,
+                         validate_adaptive_regions)
 
 
 # Legacy feature names follow the 49-column solver interface: `U` is UStar,
@@ -83,7 +84,13 @@ def validate_config(config):
         raise ValueError('The graph prototype uses mesh nodes, not Tucker cores.')
     if not config.get('add_gradDpPrev_input', False):
         raise ValueError('The graph shifter requires add_gradDpPrev_input=True.')
-    for name, default in (('graph_width', 24), ('graph_steps', 4), ('graph_patience', 20), ('num_epochs', 200)):
+    if config.get('graph_adaptive_coarsening', False):
+        extra_levels = config.get('graph_adaptive_extra_levels', 1)
+        if not isinstance(extra_levels, int) or isinstance(extra_levels, bool) or extra_levels < 1:
+            raise ValueError('graph_adaptive_extra_levels must be a positive integer.')
+        validate_adaptive_regions(config.get('graph_adaptive_regions'))
+    for name, default in (('graph_width', 24), ('graph_steps', 4), ('graph_patience', 20),
+                          ('num_epochs', 200), ('plot_every_epochs', 50)):
         value = config.get(name, default)
         if not isinstance(value, int) or isinstance(value, bool) or value < 1:
             raise ValueError(f'{name} must be a positive integer.')
@@ -94,13 +101,16 @@ def validate_config(config):
         if not np.isfinite(float(config.get(name, 1.))):
             raise ValueError(f'{name} must be finite.')
     if config.get('predict_dU_output', False):
-        if config.get('velocity_var_to_predict', 'dU') not in ('dU', 'ddU', 'ddUCorr'):
-            raise ValueError('velocity_var_to_predict must be dU, ddU, or ddUCorr.')
+        if config.get('velocity_var_to_predict', 'dU') not in ('dU', 'dUCorr', 'ddU', 'ddUCorr'):
+            raise ValueError('velocity_var_to_predict must be dU, dUCorr, ddU, or ddUCorr.')
+        if config.get('velocity_var_to_predict') in ('dUCorr', 'ddUCorr'):
+            if not config.get('add_dUStar_input'):
+                raise ValueError('dUCorr and ddUCorr require add_dUStar_input.')
         if config.get('velocity_var_to_predict') == 'ddUCorr':
             if graph_loss != 'coarse_mse':
                 raise ValueError('ddUCorr currently requires coarse_mse.')
-            if not config.get('add_dUStar_input') or not config.get('add_dUCorrPrev_input'):
-                raise ValueError('ddUCorr requires add_dUStar_input and add_dUCorrPrev_input.')
+            if not config.get('add_dUCorrPrev_input'):
+                raise ValueError('ddUCorr requires add_dUCorrPrev_input.')
         if velocity_output_mode in ('shift_source', 'shift_source_component'):
             if config.get('velocity_var_to_predict', 'dU') != 'ddU':
                 raise ValueError('Shift-source velocity output currently requires velocity_var_to_predict=ddU.')
@@ -129,13 +139,22 @@ def validate_config(config):
             raise ValueError(f'Input {name} is not implemented by the graph prototype.')
 
 
-def load_mesh_graph(centres, volumes, case_dir, data_dir, levels=3):
+def load_mesh_graph(centres, volumes, case_dir, data_dir, levels=3,
+                    adaptive_regions=None, adaptive_extra_levels=0):
     mesh = Path(case_dir) / 'constant/polyMesh'
     all_owner = np.asarray(FoamFile(mesh / 'owner')[None], dtype=np.int64)
     neighbour = np.asarray(FoamFile(mesh / 'neighbour')[None], dtype=np.int64)
     owner = all_owner[:len(neighbour)]
     boundary = FoamFile(mesh / 'boundary')[None]
-    signature = mesh_signature(centres, volumes, all_owner, neighbour, (levels, boundary))
+    graph_settings = (levels, boundary)
+    if adaptive_regions is not None:
+        adaptive_regions = validate_adaptive_regions(adaptive_regions)
+        if not isinstance(adaptive_extra_levels, int) or isinstance(adaptive_extra_levels, bool) or adaptive_extra_levels < 1:
+            raise ValueError('adaptive_extra_levels must be a positive integer when adaptive regions are enabled.')
+        graph_settings += (('adaptive', adaptive_extra_levels, tuple(map(tuple, adaptive_regions))),)
+    elif adaptive_extra_levels:
+        raise ValueError('adaptive_extra_levels requires adaptive_regions.')
+    signature = mesh_signature(centres, volumes, all_owner, neighbour, graph_settings)
     cache = Path(data_dir) / 'mesh_graph.npz'
     if cache.exists():
         with np.load(cache, allow_pickle=False) as stored:
@@ -146,7 +165,15 @@ def load_mesh_graph(centres, volumes, case_dir, data_dir, levels=3):
                 graph['native_neighbour'] = neighbour
                 print(f"[MESH GRAPH] loaded {len(centres)} -> {graph['coarse_count']} nodes", flush=True)
                 return graph, signature
-    graph = coarsen_graph(centres, volumes, owner, neighbour, levels)
+    if adaptive_regions is None:
+        graph = coarsen_graph(centres, volumes, owner, neighbour, levels)
+    else:
+        protected = protected_cells_from_regions(centres, adaptive_regions)
+        graph = coarsen_graph(centres, volumes, owner, neighbour,
+                              levels + adaptive_extra_levels, protected_cells=protected,
+                              protect_after=levels)
+        print(f'[MESH GRAPH] adaptive coarsening: protected {protected.sum()}/{len(protected)} cells '
+              f'through level {levels}; far field receives {adaptive_extra_levels} extra levels', flush=True)
     boundary_features = np.zeros((len(centres), 3))
     for name, patch in boundary:
         first, count = int(patch['startFace']), int(patch['nFaces'])
@@ -234,6 +261,8 @@ def velocity_target_from_fields(fields, config):
         return np.asarray(fields[mode])
     if mode == 'ddU' and 'dU' in fields and 'dUPrev' in fields:
         return np.asarray(fields['dU']) - np.asarray(fields['dUPrev'])
+    if mode == 'dUCorr' and 'dU' in fields and 'dUStar' in fields:
+        return np.asarray(fields['dU']) - np.asarray(fields['dUStar'])
     if mode == 'ddUCorr' and all(name in fields for name in ('dU', 'dUStar', 'dUCorrPrev')):
         return np.asarray(fields['dU']) - fields['dUStar'] - fields['dUCorrPrev']
     raise ValueError(f'Missing {mode} velocity target; collect fresh velocity-history samples.')
@@ -243,6 +272,10 @@ def compose_velocity_increment(weighted_prediction, previous, config, predictor_
     """Convert a predicted ddU residual to total dU once; direct dU passes through."""
     if config.get('velocity_var_to_predict', 'dU') == 'ddU':
         return weighted_prediction + float(config.get('velocity_extrapolation_weight_factor', 1.)) * previous
+    if config.get('velocity_var_to_predict') == 'dUCorr':
+        if predictor_increment is None:
+            raise ValueError('dUCorr composition requires the current dUStar.')
+        return weighted_prediction + predictor_increment
     if config.get('velocity_var_to_predict') == 'ddUCorr':
         if predictor_increment is None:
             raise ValueError('ddUCorr composition requires the current dUStar.')

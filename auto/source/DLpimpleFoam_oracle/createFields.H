@@ -179,3 +179,35 @@ volVectorField oracleVelocityIncrement
         vector::zero
     )
 );
+
+volVectorField oracleReconstructionWarmStartU
+(
+    IOobject
+    (
+        "oracleReconstructionWarmStartU",
+        runTime.timeName(),
+        mesh,
+        IOobject::READ_IF_PRESENT,
+        IOobject::AUTO_WRITE
+    ),
+    mesh,
+    dimensionedVector
+    (
+        "oracleReconstructionWarmStartU",
+        U.dimensions(),
+        vector::zero
+    )
+);
+
+surfaceScalarField oracleReconstructionWarmStartPhi
+(
+    IOobject
+    (
+        "oracleReconstructionWarmStartPhi",
+        runTime.timeName(),
+        mesh,
+        IOobject::READ_IF_PRESENT,
+        IOobject::AUTO_WRITE
+    ),
+    phi - phi
+);

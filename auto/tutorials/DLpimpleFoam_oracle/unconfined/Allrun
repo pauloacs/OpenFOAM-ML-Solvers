@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+
+solver="${SOLVER:-DLpimpleFoam_oracle}"
+for program in python3 blockMesh snappyHexMesh renumberMesh checkMesh "$solver"; do
+    command -v "$program" >/dev/null || { echo "Missing command: $program" >&2; exit 1; }
+done
+if [[ -d constant/polyMesh || -e system/blockMeshDict.background || -e system/snappyHexMeshDict || -e constant/triSurface/cylinders.stl ]] || compgen -G 'log.*' > /dev/null; then
+    echo 'Existing generated files found. Run bash Allclean before restarting.' >&2
+    exit 1
+fi
+for time_dir in [0-9]*; do
+    [[ -d "$time_dir" ]] || continue
+    [[ "$time_dir" =~ ^[0-9]+([.][0-9]+)?([eE][+-]?[0-9]+)?$ ]] || continue
+    if [[ "$time_dir" != 0 ]]; then
+        echo "Existing result time '$time_dir'; refusing to overwrite it." >&2
+        exit 1
+    fi
+done
+python3 -c 'import numpy'
+
+run_logged()
+{
+    local logfile="$1"
+    shift
+    "$@" > "$logfile" 2>&1 || { tail -n 60 "$logfile" >&2; return 1; }
+}
+
+run_logged log.meshInputs python3 generate_cylinder_mesh.py
+run_logged log.blockMesh blockMesh -dict system/blockMeshDict.background
+run_logged log.snappyHexMesh snappyHexMesh -overwrite -dict system/snappyHexMeshDict
+run_logged log.renumberMesh renumberMesh -overwrite
+run_logged log.checkMesh checkMesh -allGeometry -allTopology
+if ! grep -q 'Mesh OK' log.checkMesh; then
+    tail -n 60 log.checkMesh >&2
+    if [[ "${ALLOW_MESH_QUALITY_FAILURE:-0}" != 1 ]]; then
+        echo 'Mesh quality checks failed; inspect log.checkMesh before proceeding.' >&2
+        echo 'Set ALLOW_MESH_QUALITY_FAILURE=1 only to run this historical mesh knowingly.' >&2
+        exit 1
+    fi
+    echo 'WARNING: running with failed mesh quality checks; inspect log.checkMesh.' >&2
+fi
+run_logged log.solver "$solver"

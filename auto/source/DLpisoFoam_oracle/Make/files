@@ -1,0 +1,5 @@
+DLpisoFoam_oracle.C
+OracleGrid.C
+OracleGraph.C
+
+EXE = $(FOAM_APPBIN)/DLpisoFoam_oracle

@@ -7,11 +7,13 @@ This file is the top-level tutorial index; workflow assets live in
 - **AUTO**: `DLpimpleFoam_auto` samples CFD fields, trains an initial model,
 	and activates it during the same simulation. Configure it in
 	`system/MLSamplingDict` and the case's `python_module.py`.
-- **Oracle**: `DLpimpleFoam_oracle` replays reference pressure/velocity fields
-	to measure integration potential. It does not train or load a surrogate.
+- **Oracle**: `DLpimpleFoam_oracle` and `DLpisoFoam_oracle` replay reference
+	pressure/velocity fields to measure integration potential. They do not train
+	or load a surrogate.
 
 The solver sources and packages are grouped in `classical/` and `auto/` to
-match these roles. A thermal AUTO solver is not tracked in this checkout.
+match these roles. See the [AUTO workflow guide](../auto/README.md) for the
+buoyant AUTO solver's distinct pressure, buoyancy, and flux controls.
 
 ## Compact PIMPLE Tutorials
 
@@ -31,6 +33,17 @@ Classic solver examples are linked separately in the table below.
 | [Classic DLpisoFoam](../classical/tutorials/DLpisoFoam) | Offline-trained surrogate examples | PISO integration |
 | [Classic buoyant solver](../classical/tutorials/DLbuoyantPimpleFoam) | Offline-trained surrogate examples | Buoyant PIMPLE integration |
 
+## Mesh-Generated Oracle Geometries
+
+The [confined six-obstacle channel](../auto/tutorials/DLpimpleFoam_oracle/confined)
+and [unconfined staggered-cylinder case](../auto/tutorials/DLpimpleFoam_oracle/unconfined)
+recreate the larger experimental geometries from their included mesh-generator
+scripts. They ship no generated mesh or restart data. See the
+[oracle tutorial guide](../auto/tutorials/DLpimpleFoam_oracle/README.md) for
+the required mesh tools and run instructions. The historical unconfined mesh
+has known skewness and concave-cell failures; its runner requires an explicit
+override to continue if `checkMesh` fails.
+
 ### Prerequisites
 
 Follow the repository setup instructions, source the OpenFOAM 8 environment,
@@ -40,6 +53,7 @@ the pressure-only oracle-compatible mode.
 ```bash
 wmake auto/source/DLpimpleFoam_auto
 wmake auto/source/DLpimpleFoam_oracle
+wmake auto/source/DLpisoFoam_oracle
 ```
 
 For either surrogate framework, activate the project's Python 3.11 solver environment

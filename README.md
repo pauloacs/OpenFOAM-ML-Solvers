@@ -2,10 +2,6 @@
 
 **Deep Learning-Enhanced CFD Solvers for Accelerated Fluid Flow Simulations**
 
-<p align="center">
-  <img src="figures/solvers_overview.png" alt="Solvers Overview" width="700px"/>
-</p>
-
 ## 📋 Contents
 
 - [Introduction](#-introduction)
@@ -31,6 +27,7 @@
   - [DLpisoFoam](#dlpisofoam)
   - [DLpimpleFoam_auto](#dlpimplefoam_auto)
   - [DLpimpleFoam_oracle](#dlpimplefoam_oracle)
+  - [DLpisoFoam_oracle](#dlpisofoam_oracle)
   - [DLbuoyantPimpleFoam](#dlbuoyantpimplefoam)
 - [Deprecated Solver Archive](#-deprecated-solver-archive)
 - [Citation](#-citation)
@@ -39,13 +36,13 @@
 
 ## 🎯 Introduction
 
-This repository contains **machine learning-enhanced OpenFOAM solvers** that accelerate computational fluid dynamics (CFD) simulations using deep learning estimates of pressure and pressure-velocity corrections. Solver sources, Python surrogate packages, and cases are grouped under `classical/` and `auto/` according to workflow. The oracle is a reference-field diagnostic, not a learned model. A thermal AUTO solver is not included in this checkout.
+This repository contains **machine learning-enhanced OpenFOAM solvers** that accelerate computational fluid dynamics (CFD) simulations using deep learning estimates of pressure and pressure-velocity corrections. Solver sources, Python surrogate packages, and cases are grouped under `classical/` and `auto/` according to workflow. The oracle is a reference-field diagnostic, not a learned model.
 
-The tracked solver sources are **DLpisoFoam**, **DLpisoFoam_2d**,
-**DLbuoyantPimpleFoam**, **DLpimpleFoam_auto**, and **DLpimpleFoam_oracle**.
-The first three use offline-prepared surrogates, the AUTO solver trains during
-the CFD run, and the oracle replays reference fields for an integration
-comparison. A thermal AUTO implementation is not tracked in this checkout.
+The solver sources include **DLpisoFoam**, **DLpisoFoam_2d**,
+**DLbuoyantPimpleFoam**, **DLpimpleFoam_auto**, **DLbuoyantPimpleFoam_auto**,
+**DLpimpleFoam_oracle**, and **DLpisoFoam_oracle**. The classical solvers use
+offline-prepared surrogates; AUTO solvers can train during a CFD run; the
+oracles replay reference fields for integration comparisons.
 
 This is an **all-in-one repository** containing both surrogate models and CFD solvers, building upon the work from [Solving-Poisson's-Equation-through-DL-for-CFD-applications](https://github.com/pauloacs/Solving-Poisson-s-Equation-through-DL-for-CFD-apllications).
 
@@ -64,8 +61,8 @@ surrogate or want the solver to create one during the run.
 | Workflow | Source folder | Sequence | Solvers |
 | --- | --- | --- | --- |
 | Classic/offline | [`classical/`](classical/README.md) | Generate or collect CFD data, train the surrogate separately, configure its artifacts in a case, then run CFD with the trained model | `DLpisoFoam`, `DLpisoFoam_2d`, `DLbuoyantPimpleFoam` |
-| AUTO | [`auto/`](auto/README.md) | Configure sampling/training, then run CFD; the solver samples, trains an initial surrogate, and activates it in that run | `DLpimpleFoam_auto` |
-| AUTO integration diagnostic | `auto/source/DLpimpleFoam_oracle/` | Replay reference pressure/velocity fields to measure possible AUTO integration gains; no surrogate training | `DLpimpleFoam_oracle` |
+| AUTO | [`auto/`](auto/README.md) | Configure sampling/training, then run CFD; the solver samples, trains an initial surrogate, and activates it in that run | `DLpimpleFoam_auto`, `DLbuoyantPimpleFoam_auto` |
+| AUTO integration diagnostic | [`auto/source/`](auto/source/README.md) | Replay reference pressure/velocity fields to measure possible integration gains; no surrogate training | `DLpimpleFoam_oracle`, `DLpisoFoam_oracle` |
 
 The oracle is grouped with AUTO because it is primarily used to study the
 reference-injection integration path. It remains a diagnostic: it consumes
@@ -79,7 +76,9 @@ wmake classical/source/DLpisoFoam
 wmake classical/source/DLpisoFoam_2d
 wmake classical/source/DLbuoyantPimpleFoam
 wmake auto/source/DLpimpleFoam_oracle
+wmake auto/source/DLpisoFoam_oracle
 wmake auto/source/DLpimpleFoam_auto
+wmake auto/source/DLbuoyantPimpleFoam_auto
 ```
 
 For the classic workflow, training tools are grouped in
@@ -139,7 +138,7 @@ Alternatively, **sample, train and simulate in one AUTO run** using `DLpimpleFoa
 - 🔧 **OpenFOAM compatible**: Drop-in replacement for `pisoFoam` and `buoyantPimpleFoam`
 - 🤖 **Self-training**: `DLpimpleFoam_auto` trains its surrogate model automatically during the simulation — no pre-trained model needed
 - **Isothermal AUTO PIMPLE**: `DLpimpleFoam_auto` supports gridded CNN shifters and mesh-graph shifters, with pressure-only or supported joint pressure/velocity prediction
-- **Controlled oracle comparisons**: `DLpimpleFoam_oracle` compares conventional CFD with idealized reference-field injection to study the attainable integration benefit
+- **Controlled oracle comparisons**: `DLpimpleFoam_oracle` and `DLpisoFoam_oracle` compare conventional CFD with idealized reference-field injection to study the attainable integration benefit
 - 🐳 **Docker ready**: Pre-built containers for easy deployment
 - 📊 **2D & 3D**: Surrogate models available for both 2D and 3D simulation cases
 
@@ -394,6 +393,7 @@ source prep_env311.sh
 python -m pip install -e '.[mesh_graph]' mpi4py
 wmake auto/source/DLpimpleFoam_auto
 wmake auto/source/DLpimpleFoam_oracle
+wmake auto/source/DLpisoFoam_oracle
 
 cd auto/tutorials/DLpimpleFoam_auto/graph_shift/pressure_only
 bash Allrun
@@ -445,7 +445,7 @@ Held-out pressure validation also writes `obstacle_pressure_error_by_distance.cs
 
 The compact examples contain only small text inputs and train from scratch. They demonstrate integration, not mesh-independent accuracy or a guaranteed speedup. Evaluate total timestep cost, pressure iterations, outer iterations and physical errors at matched settings. The oracle uses reference information unavailable to a deployed model, so its results are an idealized diagnostic baseline, not an achieved ML performance claim.
 
-See the [tutorial index](tutorials/README.md), the [classic workflow guide](classical/README.md), and the [AUTO workflow guide](auto/README.md). The [oracle examples](auto/tutorials/DLpimpleFoam_oracle) cover pressure-only and joint reference-injection comparisons.
+See the [tutorial index](tutorials/README.md), the [classic workflow guide](classical/README.md), and the [AUTO workflow guide](auto/README.md). The [oracle examples](auto/tutorials/DLpimpleFoam_oracle) cover pressure-only and joint comparisons, plus [confined](auto/tutorials/DLpimpleFoam_oracle/confined) and [unconfined](auto/tutorials/DLpimpleFoam_oracle/unconfined) geometries whose meshes are generated by scripts.
 
 ---
 
@@ -454,6 +454,10 @@ See the [tutorial index](tutorials/README.md), the [classic workflow guide](clas
 
 ### DLpisoFoam
 **For incompressible, isothermal flows**
+
+<p align="center">
+  <img src="figures/solvers_overview.png" alt="Classical solver overview" width="700px"/>
+</p>
 
 - Based on OpenFOAM's `pisoFoam`
 - Uses pressure surrogate model to accelerate PISO algorithm
@@ -485,7 +489,14 @@ See the [tutorial index](tutorials/README.md), the [classic workflow guide](clas
 - Supports pressure-only and joint integration, with optional interpolation to assess transfer effects
 - Measures potential reductions in pressure/PIMPLE work; it is not a deployable surrogate and does not train a model
 
-**Examples:** [pressure-only oracle](auto/tutorials/DLpimpleFoam_oracle/pressure_only) and [joint oracle](auto/tutorials/DLpimpleFoam_oracle/joint).
+**Examples:** [pressure-only oracle](auto/tutorials/DLpimpleFoam_oracle/pressure_only), [joint oracle](auto/tutorials/DLpimpleFoam_oracle/joint), [confined geometry](auto/tutorials/DLpimpleFoam_oracle/confined), and [unconfined geometry](auto/tutorials/DLpimpleFoam_oracle/unconfined).
+
+### DLpisoFoam_oracle
+**Diagnostic reference solver for single-outer PISO**
+
+- Uses one momentum predictor, injects reference pressure and velocity, then runs the inner pressure correctors with the same momentum matrix
+- Shares the oracle implementation with `DLpimpleFoam_oracle`; PISO mode requires one outer corrector and zero state-reconstruction correctors
+- Compares against a reference pass; it is not a trained surrogate
 
 ---
 
@@ -504,11 +515,11 @@ See the [tutorial index](tutorials/README.md), the [classic workflow guide](clas
 
 ### Thermal AUTO variant
 
-Some historical documentation refers to `DLbuoyantPimpleFoam_auto`, but its
-source is not tracked in this checkout. The available thermal source is
-`classical/source/DLbuoyantPimpleFoam`, which uses the offline-trained-model
-workflow. The active self-training implementation is the isothermal
-`auto/source/DLpimpleFoam_auto` solver.
+`auto/source/DLbuoyantPimpleFoam_auto` provides the buoyant AUTO integration;
+its pressure, buoyancy and flux conventions differ from the incompressible
+solver. See the [buoyant integration guide](auto/README.md#buoyant-solver-integration)
+for configuration and validation details. The classical thermal solver remains
+available for offline-trained models.
 
 ---
 

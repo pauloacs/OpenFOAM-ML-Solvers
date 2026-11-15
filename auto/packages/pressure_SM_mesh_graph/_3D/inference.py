@@ -36,8 +36,11 @@ def init_func(array, z_top_boundary, z_bot_boundary, y_top_boundary, y_bot_bound
     config = _state['config']
     data_dir = configured_data_dir(config)
     metadata = json.loads((data_dir / 'graph_model.json').read_text())
+    adaptive = config.get('graph_adaptive_coarsening', False)
     graph, signature = load_mesh_graph(array[:, 3:6], array[:, 11], Path.cwd(), data_dir,
-                                       int(config.get('graph_levels', 3)))
+        int(config.get('graph_levels', 3)),
+        adaptive_regions=config.get('graph_adaptive_regions') if adaptive else None,
+        adaptive_extra_levels=int(config.get('graph_adaptive_extra_levels', 1)) if adaptive else 0)
     component_head_mismatch = (config.get('velocity_output_mode') == 'shift_source_component'
         and (metadata.get('velocity_shift_correction_factor') != float(config.get('velocity_shift_correction_factor', .25))
              or metadata.get('velocity_shift_correction_weight') != float(config.get('velocity_shift_correction_weight', .05))))
@@ -115,7 +118,9 @@ def py_func(array, U_max_norm, simulation_time=None):
         velocity *= float(config.get('velocity_output_weight_factor', config.get('output_weight_factor', 1.)))
         velocity = np.column_stack([prolong(velocity[:, component], graph,
             bool(config.get('velocity_linear_prolongation', False))) for component in range(3)])
-        if config.get('velocity_var_to_predict') == 'ddUCorr':
+        if config.get('velocity_var_to_predict') == 'dUCorr':
+            velocity = compose_velocity_increment(velocity, None, config, array[:, 11:14])
+        elif config.get('velocity_var_to_predict') == 'ddUCorr':
             velocity = compose_velocity_increment(velocity, array[:, 16:19], config, array[:, 11:14])
         else:
             velocity = compose_velocity_increment(velocity, previous_velocity, config)

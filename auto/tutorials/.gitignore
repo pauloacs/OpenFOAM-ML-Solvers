@@ -26,3 +26,12 @@ DLpimpleFoam_auto/**/SM_inspect/
 DLpimpleFoam_auto/**/log.*
 DLpimpleFoam_auto/gridded_shift/**/visualize_obstacles.png
 DLpimpleFoam_oracle/**/log.*
+DLpimpleFoam_oracle/confined/system/blockMeshDict
+DLpimpleFoam_oracle/confined/system/blockMeshDict.staggered
+DLpimpleFoam_oracle/confined/0/yPlus
+DLpimpleFoam_oracle/unconfined/system/blockMeshDict.background
+DLpimpleFoam_oracle/unconfined/system/snappyHexMeshDict
+DLpimpleFoam_oracle/unconfined/constant/triSurface/cylinders.stl
+DLpimpleFoam_oracle/unconfined/0/cellLevel
+DLpimpleFoam_oracle/unconfined/0/pointLevel
+DLpimpleFoam_oracle/unconfined/0/yPlus

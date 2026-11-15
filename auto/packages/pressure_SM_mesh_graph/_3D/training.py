@@ -53,7 +53,9 @@ def native_validation_prediction(pressure, velocity, group, graph, config, linea
     if velocity is not None:
         velocity = np.column_stack([prolong(velocity[:, component], graph, linear=linear) for component in range(3)])
         previous_velocity = group['dUPrev'][:] if 'dUPrev' in group else np.zeros_like(velocity)
-        if config.get('velocity_var_to_predict') == 'ddUCorr':
+        if config.get('velocity_var_to_predict') == 'dUCorr':
+            velocity = compose_velocity_increment(velocity, None, config, group['dUStar'][:])
+        elif config.get('velocity_var_to_predict') == 'ddUCorr':
             velocity = compose_velocity_increment(velocity, group['dUCorrPrev'][:], config, group['dUStar'][:])
         else:
             velocity = compose_velocity_increment(velocity, previous_velocity, config)
@@ -82,9 +84,81 @@ def final_velocity_error_metrics(start_velocity, predicted_increment, truth_incr
     return metrics
 
 
+def target_slice_geometry(handle, centres):
+    centres = np.asarray(centres, dtype=float)
+    bounds = np.array([centres.min(axis=0), centres.max(axis=0)])
+    if 'boundary_coordinates' in handle:
+        boundary = handle['boundary_coordinates'][:]
+        if len(boundary):
+            bounds[0] = np.minimum(bounds[0], boundary.min(axis=0))
+            bounds[1] = np.maximum(bounds[1], boundary.max(axis=0))
+    patch_ids = [int(name.split('_')[-1]) for name, value in handle.attrs.items()
+                 if name.startswith('patch_')
+                 and (value.decode() if isinstance(value, bytes) else str(value)) == 'obstacle']
+    slice_z = .5 * (bounds[0, 2] + bounds[1, 2])
+    obstacle_points = None
+    if patch_ids and 'boundary_coordinates' in handle and 'boundary_patches' in handle:
+        obstacle_points = handle['boundary_coordinates'][:][np.isin(handle['boundary_patches'][:], patch_ids)]
+        if len(obstacle_points):
+            slice_z = .5 * (obstacle_points[:, 2].min() + obstacle_points[:, 2].max())
+    return slice_z, bounds, obstacle_points
+
+
+def plot_training_target_slices(handle, sample_keys, centres, volumes, config, directory):
+    if not config.get('plot_training', True):
+        return []
+    if not sample_keys:
+        return []
+
+    from .plots import plot_target_z_slice
+    centres = np.asarray(centres, dtype=float)
+    volumes = np.asarray(volumes, dtype=float).reshape(-1)
+    slice_z, bounds, obstacle_points = target_slice_geometry(handle, centres)
+    output_directory = Path(directory)
+    written = []
+    for name in sample_keys:
+        group = handle[name]
+        if 'ddp' in group:
+            ddp = group['ddp'][:]
+        elif 'dp' in group and 'dpPrev' in group:
+            ddp = group['dp'][:] - group['dpPrev'][:]
+        else:
+            raise ValueError(f'Missing pressure target fields for Z-slice diagnostics in {name}.')
+        if 'dp' in group:
+            dp = group['dp'][:]
+        elif 'dpPrev' in group:
+            dp = ddp + group['dpPrev'][:]
+        else:
+            raise ValueError(f'Missing dp or dpPrev for Z-slice diagnostics in {name}.')
+        dp = np.asarray(dp, dtype=float).reshape(-1)
+        ddp = np.asarray(ddp, dtype=float).reshape(-1)
+        dp -= np.average(dp, weights=volumes)
+        ddp -= np.average(ddp, weights=volumes)
+        fields = dict(dp=dp, ddp=ddp)
+        velocity_target_name = config.get('velocity_var_to_predict', 'dU')
+        if config.get('predict_dU_output', False):
+            velocity_fields = {field: group[field][:] for field in ('dU', 'dUStar', 'dUCorrPrev', 'dUPrev')
+                               if field in group}
+            if 'dU' not in velocity_fields:
+                raise ValueError(f'Missing dU target for Z-slice diagnostics in {name}.')
+            required_fields = (('dUStar',) if velocity_target_name == 'dUCorr'
+                               else ('dUStar', 'dUCorrPrev') if velocity_target_name == 'ddUCorr' else ())
+            if not all(field in velocity_fields for field in required_fields):
+                raise ValueError(f'Missing required predictor/correction history for {velocity_target_name} target in {name}.')
+            if velocity_target_name == 'ddU' and 'dUPrev' not in velocity_fields:
+                raise ValueError(f'Missing dUPrev for ddU target in {name}.')
+            fields['dU'] = velocity_fields['dU']
+            fields['velocity_target'] = velocity_target_from_fields(velocity_fields, config)
+        written.append(plot_target_z_slice(centres, fields, output_directory, name,
+                                           z_slice=slice_z, velocity_target_name=velocity_target_name,
+                                           mesh_bounds=bounds, obstacle_points=obstacle_points))
+    return written
+
+
 def evaluate_validation(model, samples, sample_keys, graph, stats, config, source, plot_directory):
     from .graph_model import reconstruct, reconstruct_velocity_shift, reconstruct_velocity_component_shift
     from .plots import (comparison_metrics, summarize_comparisons, print_comparison_summary,
+                        plot_target_z_slice,
                         plot_pressure_comparison, plot_prediction_statistics, plot_shifter_components,
                         plot_validation_history, obstacle_distance_pressure_metrics,
                         plot_obstacle_pressure_error_map, plot_obstacle_distance_pressure_summary,
@@ -97,6 +171,8 @@ def evaluate_validation(model, samples, sample_keys, graph, stats, config, sourc
     native_records = []
     obstacle_error_records = []
     with h5py.File(source, 'r') as handle:
+        if config.get('plot_training', True) and 'centres' in graph:
+            slice_z, slice_bounds, slice_obstacle_points = target_slice_geometry(handle, graph['centres'])
         obstacle_points = None
         if 'boundary_coordinates' in handle and 'boundary_patches' in handle:
             patch_name = config.get('loss_obstacle_patch', 'obstacle')
@@ -156,6 +232,12 @@ def evaluate_validation(model, samples, sample_keys, graph, stats, config, sourc
                 if 'U' in group and 'dUStar' in group:
                     start_velocity = restrict(group['U'][:] - group['dUStar'][:], graph['mapping'],
                                               graph['volumes'], graph['coarse_count'])
+                if config.get('velocity_var_to_predict') == 'dUCorr':
+                    predictor_increment = restrict(group['dUStar'][:], graph['mapping'], graph['volumes'],
+                                                   graph['coarse_count'])
+                    velocity = compose_velocity_increment(velocity, None, config, predictor_increment)
+                    velocity_truth = restrict(group['dU'][:], graph['mapping'], graph['volumes'],
+                                              graph['coarse_count'])
                 if 'dUPrev' in group:
                     previous_velocity = restrict(group['dUPrev'][:], graph['mapping'], graph['volumes'], graph['coarse_count'])
                     if config.get('velocity_var_to_predict') == 'ddUCorr':
@@ -164,7 +246,8 @@ def evaluate_validation(model, samples, sample_keys, graph, stats, config, sourc
                         velocity = compose_velocity_increment(velocity, correction_previous, config, predictor_increment)
                         velocity_truth = restrict(group['dU'][:], graph['mapping'], graph['volumes'], graph['coarse_count'])
                     else:
-                        velocity = compose_velocity_increment(velocity, previous_velocity, config)
+                        if config.get('velocity_var_to_predict') != 'dUCorr':
+                            velocity = compose_velocity_increment(velocity, previous_velocity, config)
                     if config.get('velocity_var_to_predict', 'dU') == 'ddU':
                         velocity_truth += previous_velocity
                     metrics['velocity_trend_rmse'] = float(np.sqrt(np.average(np.sum((previous_velocity - velocity_truth) ** 2, axis=1),
@@ -194,6 +277,32 @@ def evaluate_validation(model, samples, sample_keys, graph, stats, config, sourc
                                                         graph['volumes'], mode)
                     pressure_error = native['prediction'] - native['truth']
                     velocity_error = native['velocity'] - native['velocity_truth'] if joint else None
+                    if config.get('plot_training', True) and linear == bool(config.get('graph_linear_prolongation', True)):
+                        reference_fields = dict(dp=native['truth'], ddp=native['truth'] - native['previous'])
+                        prediction_fields = dict(dp=native['prediction'], ddp=native['prediction'] - native['previous'])
+                        velocity_mode = config.get('velocity_var_to_predict', 'dU')
+                        if joint:
+                            velocity_fields = {field: group[field][:] for field in ('dU', 'dUStar', 'dUCorrPrev', 'dUPrev')
+                                               if field in group}
+                            reference_fields.update(dU=group['dU'][:],
+                                velocity_target=velocity_target_from_fields(velocity_fields, config))
+                            from .mesh_graph import prolong
+                            residual_velocity = np.column_stack([prolong(velocity_residual[:, component], graph,
+                                linear=bool(config.get('velocity_linear_prolongation', False))) for component in range(3)])
+                            if velocity_mode == 'dUCorr':
+                                total_velocity = compose_velocity_increment(residual_velocity, None, config,
+                                                                            group['dUStar'][:])
+                            elif velocity_mode == 'ddUCorr':
+                                total_velocity = compose_velocity_increment(residual_velocity, group['dUCorrPrev'][:],
+                                                                            config, group['dUStar'][:])
+                            else:
+                                total_velocity = compose_velocity_increment(residual_velocity,
+                                    group['dUPrev'][:] if 'dUPrev' in group else np.zeros_like(residual_velocity), config)
+                            prediction_fields.update(dU=total_velocity, velocity_target=residual_velocity)
+                        plot_target_z_slice(graph['centres'], reference_fields,
+                            plot_directory / 'validation_z_images', name, z_slice=slice_z,
+                            velocity_target_name=velocity_mode, mesh_bounds=slice_bounds, predictions=prediction_fields,
+                            obstacle_points=slice_obstacle_points)
                     if joint:
                         native_metrics['velocity_rmse'] = float(np.sqrt(np.average(np.sum(velocity_error ** 2, axis=1),
                                                                                   weights=graph['volumes'])))
@@ -341,8 +450,11 @@ def main(argv=None):
         if any(name not in handle for name in required):
             raise ValueError('Fresh solver samples with coordinates, volumes and mesh bounds are required.')
         centres, volumes = handle['coordinates'][:], handle['cell_volumes'][:]
+        adaptive = config.get('graph_adaptive_coarsening', False)
         graph, signature = load_mesh_graph(centres, volumes, Path.cwd(), data_dir,
-                                           int(config.get('graph_levels', 3)))
+            int(config.get('graph_levels', 3)),
+            adaptive_regions=config.get('graph_adaptive_regions') if adaptive else None,
+            adaptive_extra_levels=int(config.get('graph_adaptive_extra_levels', 1)) if adaptive else 0)
         if native_enabled:
             from foamlib import FoamFile
             from .native_loss import native_loss_geometry
@@ -365,6 +477,12 @@ def main(argv=None):
             sample_keys = sample_keys[-args.window_frames:]
         if len(sample_keys) < 3:
             raise ValueError('At least three timestep samples are required for graph training/validation.')
+        if args.evaluate_only and args.plot_dir:
+            target_plot_directory = Path(args.plot_dir) / 'target_z_slices'
+        else:
+            target_plot_directory = data_dir / 'training_plots' / config.get('var_to_predict', 'ddp') / 'target_z_slices'
+        target_split = max(1, min(len(sample_keys) - 1, int(.8 * len(sample_keys))))
+        plot_training_target_slices(handle, sample_keys[:target_split], centres, volumes, config, target_plot_directory)
         samples = []
         previous_velocity_coarse = []
         for name in sample_keys:
@@ -388,8 +506,10 @@ def main(argv=None):
                 if config.get('velocity_output_mode', 'direct') in ('shift_source', 'shift_source_component') and 'dUPrev' not in group:
                     raise ValueError('The shift-source velocity head requires fresh dUPrev samples.')
                 velocity_fields = {'dU': group['dU'][:]}
-                if config.get('velocity_var_to_predict') == 'ddUCorr':
-                    velocity_fields.update(dUStar=group['dUStar'][:], dUCorrPrev=group['dUCorrPrev'][:])
+                if config.get('velocity_var_to_predict') in ('dUCorr', 'ddUCorr'):
+                    velocity_fields['dUStar'] = group['dUStar'][:]
+                    if config.get('velocity_var_to_predict') == 'ddUCorr':
+                        velocity_fields['dUCorrPrev'] = group['dUCorrPrev'][:]
                 if 'dUPrev' in group:
                     velocity_fields['dUPrev'] = group['dUPrev'][:]
                     if config.get('velocity_output_mode', 'direct') in ('shift_source', 'shift_source_component'):
@@ -430,7 +550,9 @@ def main(argv=None):
                     channels=len(mean), samples=len(samples), training=split, validation=len(validation),
                     predict_dU_output=bool(joint), velocity_var_to_predict=config.get('velocity_var_to_predict', 'dU'),
                     velocity_output_mode=velocity_output_mode,
-                    velocity_target=('difference_of_predictor_to_final_corrections'
+                    velocity_target=('final_velocity_increment_minus_predictor'
+                                     if config.get('velocity_var_to_predict') == 'dUCorr'
+                                     else 'difference_of_predictor_to_final_corrections'
                                      if config.get('velocity_var_to_predict') == 'ddUCorr'
                                      else 'difference_of_timestep_velocity_increments'
                                      if config.get('velocity_var_to_predict', 'dU') == 'ddU'
@@ -585,7 +707,10 @@ def main(argv=None):
     history = []
     component_history = []
     joint_loss_history = []
-    joint_loss_history = []
+    plot_every_epochs = int(config.get('plot_every_epochs', 50))
+    if plot_every_epochs < 1:
+        raise ValueError('plot_every_epochs must be positive.')
+    last_plotted_epoch = 0
     rng = np.random.default_rng(42)
     for epoch in range(int(config.get('num_epochs', 200))):
         losses = np.asarray([step(*training[index], True, native_samples[index] if native_enabled else None,
@@ -602,20 +727,24 @@ def main(argv=None):
             message += f' pressure={val_parts[1]:.6g} velocity={val_parts[2]:.6g}'
             joint_loss_history.append((epoch + 1, float(np.mean(losses[:, 1])), float(val_parts[1]),
                                        float(np.mean(losses[:, 2])), float(val_parts[2])))
-            from .plots import plot_joint_loss_history
-            plot_joint_loss_history(joint_loss_history, plot_directory,
-                                    make_plot=config.get('plot_training', True) or args.resume)
         if native_enabled:
             message += f' pressure_gradient={val_parts[3]:.6g} velocity_gradient={val_parts[4]:.6g}'
             component_history.append((epoch + 1, *np.mean(losses, axis=0).tolist(), *val_parts.tolist()))
-            from .plots import plot_loss_components
-            plot_loss_components(component_history, plot_directory,
-                                 make_plot=config.get('plot_training', True) or args.resume)
         print(message, flush=True)
         history.append((epoch + 1, float(np.mean(losses[:, 0])), val_loss))
-        if config.get('plot_training', True) or args.resume:
-            from .plots import plot_loss
-            plot_loss(history, plot_directory)
+        if (epoch + 1) % plot_every_epochs == 0:
+            if joint:
+                from .plots import plot_joint_loss_history
+                plot_joint_loss_history(joint_loss_history, plot_directory,
+                                        make_plot=config.get('plot_training', True) or args.resume)
+            if native_enabled:
+                from .plots import plot_loss_components
+                plot_loss_components(component_history, plot_directory,
+                                     make_plot=config.get('plot_training', True) or args.resume)
+            if config.get('plot_training', True) or args.resume:
+                from .plots import plot_loss
+                plot_loss(history, plot_directory)
+            last_plotted_epoch = epoch + 1
         if val_loss < best:
             best, stale = val_loss, 0
             model.save_weights(str(data_dir / 'graph_weights.h5'))
@@ -623,6 +752,18 @@ def main(argv=None):
             stale += 1
         if stale >= int(config.get('graph_patience', 20)):
             break
+    if history and last_plotted_epoch != history[-1][0]:
+        if joint:
+            from .plots import plot_joint_loss_history
+            plot_joint_loss_history(joint_loss_history, plot_directory,
+                                    make_plot=config.get('plot_training', True) or args.resume)
+        if native_enabled:
+            from .plots import plot_loss_components
+            plot_loss_components(component_history, plot_directory,
+                                 make_plot=config.get('plot_training', True) or args.resume)
+        if config.get('plot_training', True) or args.resume:
+            from .plots import plot_loss
+            plot_loss(history, plot_directory)
     model.load_weights(str(data_dir / 'graph_weights.h5'))
     if native_enabled:
         from .native_loss import evaluate_native_state

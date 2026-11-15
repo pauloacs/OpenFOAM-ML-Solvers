@@ -38,22 +38,53 @@ def coarse_vector_gradient(values, graph):
     return np.einsum('nij,nkj->nki', inverse, rhs)
 
 
-def _pair_aggregates(indptr, indices):
+def _pair_aggregates(indptr, indices, protected=None, freeze_protected=True):
     mapping = np.full(len(indptr) - 1, -1, dtype=np.int64)
     aggregate = 0
     for cell in np.argsort(np.diff(indptr), kind='stable'):
         if mapping[cell] >= 0:
             continue
         mapping[cell] = aggregate
+        if protected is not None and freeze_protected and protected[cell]:
+            aggregate += 1
+            continue
         for neighbour in indices[indptr[cell]:indptr[cell + 1]]:
-            if mapping[neighbour] < 0:
+            same_region = protected is None or protected[neighbour] == protected[cell]
+            if mapping[neighbour] < 0 and same_region:
                 mapping[neighbour] = aggregate
                 break
         aggregate += 1
     return mapping
 
 
-def coarsen_graph(centres, volumes, owner, neighbour, levels=3):
+def validate_adaptive_regions(regions):
+    try:
+        boxes = np.asarray(regions, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError('graph_adaptive_regions must be a sequence of six-value boxes.') from error
+    if boxes.ndim != 2 or boxes.shape[1] != 6 or not len(boxes) or not np.isfinite(boxes).all():
+        raise ValueError('graph_adaptive_regions must contain finite (xmin, xmax, ymin, ymax, zmin, zmax) boxes.')
+    if np.any(boxes[:, (0, 2, 4)] >= boxes[:, (1, 3, 5)]):
+        raise ValueError('Each graph_adaptive_regions minimum must be below its maximum.')
+    return boxes
+
+
+def protected_cells_from_regions(centres, regions):
+    centres = np.asarray(centres, dtype=np.float64)
+    if centres.ndim != 2 or centres.shape[1] != 3 or not np.isfinite(centres).all():
+        raise ValueError('Cell centres must be a finite (nCells, 3) array.')
+    boxes = validate_adaptive_regions(regions)
+    protected = np.zeros(len(centres), dtype=bool)
+    for box in boxes:
+        lower, upper = box[[0, 2, 4]], box[[1, 3, 5]]
+        protected |= np.all((centres >= lower) & (centres <= upper), axis=1)
+    if not protected.any():
+        raise ValueError('graph_adaptive_regions do not include any mesh cell centres.')
+    return protected
+
+
+def coarsen_graph(centres, volumes, owner, neighbour, levels=3,
+                  protected_cells=None, protect_after=None):
     centres = np.asarray(centres, dtype=np.float64)
     volumes = np.asarray(volumes, dtype=np.float64)
     owner = np.asarray(owner, dtype=np.int64)
@@ -67,14 +98,27 @@ def coarsen_graph(centres, volumes, owner, neighbour, levels=3):
         raise ValueError('Internal-face owner/neighbour arrays must have identical shapes and valid indices.')
     if np.any(owner >= count) or np.any(neighbour >= count) or levels < 0:
         raise ValueError('Invalid graph connectivity or coarsening level.')
+    if protected_cells is not None:
+        protected_cells = np.asarray(protected_cells, dtype=bool)
+        if protected_cells.shape != (count,):
+            raise ValueError('protected_cells must have one value per native mesh cell.')
+        if protect_after is None:
+            protect_after = levels
+        if not isinstance(protect_after, (int, np.integer)) or not 0 <= protect_after <= levels:
+            raise ValueError('protect_after must be between zero and levels.')
     rows = np.concatenate((owner, neighbour))
     columns = np.concatenate((neighbour, owner))
     keep = rows != columns
     adjacency = sparse.csr_matrix((np.ones(np.count_nonzero(keep)), (rows[keep], columns[keep])), shape=(count, count))
     original_components, _ = connected_components(adjacency)
     mapping = np.arange(count)
-    for _ in range(levels):
-        local = _pair_aggregates(adjacency.indptr, adjacency.indices)
+    for level in range(levels):
+        protected_nodes = None
+        if protected_cells is not None:
+            protected_nodes = np.zeros(adjacency.shape[0], dtype=bool)
+            np.logical_or.at(protected_nodes, mapping, protected_cells)
+        local = _pair_aggregates(adjacency.indptr, adjacency.indices, protected_nodes,
+                                 freeze_protected=protected_cells is not None and level >= protect_after)
         mapping = local[mapping]
         coarse_count = int(local.max()) + 1
         edges = adjacency.tocoo()
