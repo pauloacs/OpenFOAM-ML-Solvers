@@ -180,11 +180,28 @@ int main(int argc, char *argv[])
         oracleDict.lookupOrDefault<bool>("useGraphCoarsening", false);
     const bool oracleGraphLinearProlongation =
         oracleDict.lookupOrDefault<bool>("graphLinearProlongation", false);
+    const bool oracleGraphLinearVelocityProlongation =
+        oracleDict.lookupOrDefault<bool>
+        (
+            "graphLinearVelocityProlongation",
+            false
+        );
     const label oracleGraphCoarseningLevels = oracleDict.lookupOrDefault<label>
     (
         "graphCoarseningLevels",
         2
     );
+    const word oracleGraphObstaclePatch = oracleDict.lookupOrDefault<word>
+    (
+        "graphObstaclePatch",
+        "obstacle"
+    );
+    const label oracleGraphObstacleProtectionLayers =
+        oracleDict.lookupOrDefault<label>
+        (
+            "graphObstacleProtectionLayers",
+            0
+        );
     word oracleGraphPressureMode = oracleDict.lookupOrDefault<word>
     (
         "graphPressureMode",
@@ -202,13 +219,31 @@ int main(int argc, char *argv[])
             ? word("dp")
             : word("ddpResidual");
     }
-    const word oracleGraphVelocityMode = oracleDict.lookupOrDefault<word>
+    word oracleGraphVelocityMode = oracleDict.lookupOrDefault<word>
     (
         "graphVelocityMode",
         "dU"
     );
+    if
+    (
+        oracleGraphVelocityMode == "dUCorrResidual"
+     || oracleGraphVelocityMode == "duCorrResidual"
+    )
+    {
+        oracleGraphVelocityMode = "dUCorr";
+    }
+    else if (oracleGraphVelocityMode == "ddUCorrResidual")
+    {
+        oracleGraphVelocityMode = "ddUCorr";
+    }
     const scalar oracleGraphBaselineWeightFactor =
         oracleDict.lookupOrDefault<scalar>("graphBaselineWeightFactor", 1.0);
+    const scalar oracleGraphVelocityPreviousIncrementWeightFactor =
+        oracleDict.lookupOrDefault<scalar>
+        (
+            "graphVelocityPreviousIncrementWeightFactor",
+            1.0
+        );
     const scalar oracleGraphVelocityPreviousCorrectionWeightFactor =
         oracleDict.lookupOrDefault<scalar>
         (
@@ -230,11 +265,13 @@ int main(int argc, char *argv[])
     if
     (
         oracleGraphVelocityMode != "dU"
-     && oracleGraphVelocityMode != "ddUCorrResidual"
+     && oracleGraphVelocityMode != "ddU"
+     && oracleGraphVelocityMode != "dUCorr"
+     && oracleGraphVelocityMode != "ddUCorr"
     )
     {
         FatalErrorInFunction
-            << "graphVelocityMode must be dU or ddUCorrResidual."
+            << "graphVelocityMode must be dU, ddU, dUCorr, or ddUCorr."
             << exit(FatalError);
     }
     if (!std::isfinite(oracleGraphVelocityPreviousCorrectionWeightFactor))
@@ -245,7 +282,16 @@ int main(int argc, char *argv[])
     }
     if
     (
-        oracleGraphVelocityMode == "ddUCorrResidual"
+        !std::isfinite(oracleGraphVelocityPreviousIncrementWeightFactor)
+    )
+    {
+        FatalErrorInFunction
+            << "graphVelocityPreviousIncrementWeightFactor must be finite."
+            << exit(FatalError);
+    }
+    if
+    (
+        oracleGraphVelocityMode != "dU"
      &&
         (
             !oracleUseGraphCoarsening
@@ -255,13 +301,14 @@ int main(int argc, char *argv[])
     )
     {
         FatalErrorInFunction
-            << "graphVelocityMode ddUCorrResidual requires "
+            << "graphVelocityMode ddU/dUCorr/ddUCorr requires "
             << "useGraphCoarsening true, useVelocityIncrement true, and "
             << "integrationMode pressureForceThenReconstruct."
             << exit(FatalError);
     }
     labelList oracleGraphMapping;
     label oracleGraphCoarseCount = 0;
+    label oracleGraphProtectedCellCount = 0;
     autoPtr<OracleGraphLinearTransfer> oracleGraphLinearTransfer;
     if (oracleUseGraphCoarsening)
     {
@@ -299,14 +346,27 @@ int main(int argc, char *argv[])
                 << "graphCoarseningLevels must be non-negative."
                 << exit(FatalError);
         }
+        if (oracleGraphObstacleProtectionLayers < 0)
+        {
+            FatalErrorInFunction
+                << "graphObstacleProtectionLayers must be non-negative."
+                << exit(FatalError);
+        }
 
         oracleGraphMapping = oracleGraphCoarsen
         (
             mesh,
             oracleGraphCoarseningLevels,
-            oracleGraphCoarseCount
+            oracleGraphCoarseCount,
+            oracleGraphObstaclePatch,
+            oracleGraphObstacleProtectionLayers,
+            oracleGraphProtectedCellCount
         );
-        if (oracleGraphLinearProlongation)
+        if
+        (
+            oracleGraphLinearProlongation
+         || oracleGraphLinearVelocityProlongation
+        )
         {
             oracleGraphLinearTransfer.reset
             (
@@ -321,17 +381,31 @@ int main(int argc, char *argv[])
         Info<< "[ORACLE GRAPH] native cells=" << mesh.nCells()
             << " coarse nodes=" << oracleGraphCoarseCount
             << " levels=" << oracleGraphCoarseningLevels
+            << " obstacle patch=" << oracleGraphObstaclePatch
+            << " obstacle protection layers="
+            << oracleGraphObstacleProtectionLayers
+            << " protected cells=" << oracleGraphProtectedCellCount
             << " pressure mode=" << oracleGraphPressureMode
             << " full coarse prediction="
             << oracleGraphFullCoarsePrediction
                 << " linear pressure prolongation="
                 << oracleGraphLinearProlongation
-            << " velocity mode=" << oracleGraphVelocityMode << nl;
+                << " linear velocity prolongation="
+                << oracleGraphLinearVelocityProlongation
+            << " velocity mode=" << oracleGraphVelocityMode
+            << " previous dU weight="
+            << oracleGraphVelocityPreviousIncrementWeightFactor
+            << " previous dUCorr weight="
+            << oracleGraphVelocityPreviousCorrectionWeightFactor << nl;
     }
-            else if (oracleGraphLinearProlongation)
+            else if
+            (
+                oracleGraphLinearProlongation
+             || oracleGraphLinearVelocityProlongation
+            )
             {
             FatalErrorInFunction
-                << "graphLinearProlongation requires useGraphCoarsening true."
+                << "Graph linear prolongation requires useGraphCoarsening true."
                 << exit(FatalError);
             }
     const label oracleStateReconstructionCorrectors =
@@ -614,7 +688,7 @@ int main(int argc, char *argv[])
             mesh,
             (
                 runTime.timeIndex() == 0
-             || oracleGraphVelocityMode != "ddUCorrResidual"
+                 || oracleGraphVelocityMode != "ddUCorr"
             )
                 ? IOobject::READ_IF_PRESENT
                 : IOobject::MUST_READ,
@@ -622,6 +696,19 @@ int main(int argc, char *argv[])
         ),
         mesh,
         dimensionedVector("oracleDUCorrPrevTruth", U.dimensions(), vector::zero)
+    );
+    volVectorField oracleDUPrevTruth
+    (
+        IOobject
+        (
+            "oracleDUPrevTruth",
+            runTime.timeName(),
+            mesh,
+            IOobject::READ_IF_PRESENT,
+            IOobject::AUTO_WRITE
+        ),
+        mesh,
+        dimensionedVector("oracleDUPrevTruth", U.dimensions(), vector::zero)
     );
     volVectorField oracleDDUCorrTruth
     (
@@ -1077,47 +1164,113 @@ int main(int argc, char *argv[])
                         firstPredictorUSolve
                     );
 
-                if (oracleGraphVelocityMode == "ddUCorrResidual")
+                const volVectorField oracleDUTruth
+                (
+                    IOobject
+                    (
+                        "oracleDUTruth",
+                        runTime.timeName(),
+                        mesh,
+                        IOobject::NO_READ,
+                        IOobject::NO_WRITE,
+                        false
+                    ),
+                    UPost - UPre
+                );
+
+                auto transferVelocityResidual =
+                [&](volVectorField& residual)
+                {
+                    if (oracleUseGraphCoarsening)
+                    {
+                        if (oracleGraphLinearVelocityProlongation)
+                        {
+                            oracleGraphLinearTransfer->linearRoundTrip
+                            (
+                                residual.primitiveFieldRef()
+                            );
+                        }
+                        else
+                        {
+                            oracleGraphRoundTrip
+                            (
+                                residual.primitiveFieldRef(),
+                                oracleGraphMapping,
+                                mesh.V(),
+                                oracleGraphCoarseCount
+                            );
+                        }
+                    }
+                    else if (oracleUseInterpolation)
+                    {
+                        residual = oracleVectorGridRoundTrip
+                        (
+                            residual,
+                            oracleGridRes
+                        );
+                    }
+                };
+
+                if (oracleGraphVelocityMode == "dU")
+                {
+                    oracleVelocityIncrement = oracleDUTruth;
+                    transferVelocityResidual(oracleVelocityIncrement);
+                    oracleVelocityIncrement *= oracleOutputWeightFactor;
+                }
+                else if (oracleGraphVelocityMode == "ddU")
+                {
+                    volVectorField ddUTruth
+                    (
+                        IOobject
+                        (
+                            "oracleDDUTruth",
+                            runTime.timeName(),
+                            mesh,
+                            IOobject::NO_READ,
+                            IOobject::NO_WRITE,
+                            false
+                        ),
+                        oracleDUTruth - oracleDUPrevTruth
+                    );
+                    transferVelocityResidual(ddUTruth);
+                    oracleVelocityIncrement =
+                        oracleGraphVelocityPreviousIncrementWeightFactor
+                       *oracleDUPrevTruth
+                      + oracleOutputWeightFactor*ddUTruth;
+                }
+                else if (oracleGraphVelocityMode == "dUCorr")
+                {
+                    volVectorField dUCorrTruth
+                    (
+                        IOobject
+                        (
+                            "oracleDUCorrTruth",
+                            runTime.timeName(),
+                            mesh,
+                            IOobject::NO_READ,
+                            IOobject::NO_WRITE,
+                            false
+                        ),
+                        UPost - oracleUStarTruth
+                    );
+                    transferVelocityResidual(dUCorrTruth);
+                    oracleVelocityIncrement = oracleUStarTruth - UPre
+                        + oracleOutputWeightFactor*dUCorrTruth;
+                    oracleDUCorrPrevTruth = UPost - oracleUStarTruth;
+                }
+                else
                 {
                     oracleDDUCorrTruth = UPost - oracleUStarTruth
                                       - oracleDUCorrPrevTruth;
-                    oracleGraphRoundTrip
-                    (
-                        oracleDDUCorrTruth.primitiveFieldRef(),
-                        oracleGraphMapping,
-                        mesh.V(),
-                        oracleGraphCoarseCount
-                    );
-                    oracleVelocityIncrement =
-                        oracleUStarTruth - UPre
+                    transferVelocityResidual(oracleDDUCorrTruth);
+                    oracleVelocityIncrement = oracleUStarTruth - UPre
                       + oracleGraphVelocityPreviousCorrectionWeightFactor
                        *oracleDUCorrPrevTruth
                       + oracleOutputWeightFactor*oracleDDUCorrTruth;
                     oracleDUCorrPrevTruth = UPost - oracleUStarTruth;
                 }
-                else
-                {
-                    oracleVelocityIncrement = UPost - UPre;
-                    if (oracleUseGraphCoarsening)
-                    {
-                        oracleGraphRoundTrip
-                        (
-                            oracleVelocityIncrement.primitiveFieldRef(),
-                            oracleGraphMapping,
-                            mesh.V(),
-                            oracleGraphCoarseCount
-                        );
-                    }
-                    else if (oracleUseInterpolation)
-                    {
-                        oracleVelocityIncrement = oracleVectorGridRoundTrip
-                        (
-                            oracleVelocityIncrement,
-                            oracleGridRes
-                        );
-                    }
-                    oracleVelocityIncrement *= oracleOutputWeightFactor;
-                }
+
+                oracleDUPrevTruth = oracleDUTruth;
 
                 p = pOracleGuess;
                 if (oracleUseVelocityIncrement)

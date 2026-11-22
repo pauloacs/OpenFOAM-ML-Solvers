@@ -1,0 +1,5 @@
+DLpisoFoam_auto.C
+MLSampling.C
+SurrogateModel.C
+
+EXE = $(FOAM_APPBIN)/DLpisoFoam_auto

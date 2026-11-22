@@ -3,8 +3,8 @@ from pathlib import Path
 import numpy as np
 from foamlib import FoamFile
 
-from .mesh_graph import (coarsen_graph, mesh_signature, protected_cells_from_regions, restrict,
-                         validate_adaptive_regions)
+from .mesh_graph import (coarsen_graph, mesh_signature, protected_cells_from_layers,
+                         protected_cells_from_regions, restrict, validate_adaptive_regions)
 
 
 # Legacy feature names follow the 49-column solver interface: `U` is UStar,
@@ -84,6 +84,14 @@ def validate_config(config):
         raise ValueError('The graph prototype uses mesh nodes, not Tucker cores.')
     if not config.get('add_gradDpPrev_input', False):
         raise ValueError('The graph shifter requires add_gradDpPrev_input=True.')
+    obstacle_layers = config.get('graph_obstacle_protection_layers', 0)
+    if not isinstance(obstacle_layers, (int, np.integer)) or isinstance(obstacle_layers, (bool, np.bool_)) or obstacle_layers < 0:
+        raise ValueError('graph_obstacle_protection_layers must be a nonnegative integer.')
+    obstacle_patch = config.get('graph_obstacle_patch', 'obstacle')
+    if not isinstance(obstacle_patch, str) or not obstacle_patch.strip():
+        raise ValueError('graph_obstacle_patch must be a nonempty patch name.')
+    if obstacle_layers and config.get('graph_adaptive_coarsening', False):
+        raise ValueError('Obstacle layer protection cannot be combined with graph_adaptive_coarsening.')
     if config.get('graph_adaptive_coarsening', False):
         extra_levels = config.get('graph_adaptive_extra_levels', 1)
         if not isinstance(extra_levels, int) or isinstance(extra_levels, bool) or extra_levels < 1:
@@ -140,13 +148,28 @@ def validate_config(config):
 
 
 def load_mesh_graph(centres, volumes, case_dir, data_dir, levels=3,
-                    adaptive_regions=None, adaptive_extra_levels=0):
+                    adaptive_regions=None, adaptive_extra_levels=0,
+                    obstacle_patch='obstacle', obstacle_layers=0):
     mesh = Path(case_dir) / 'constant/polyMesh'
     all_owner = np.asarray(FoamFile(mesh / 'owner')[None], dtype=np.int64)
     neighbour = np.asarray(FoamFile(mesh / 'neighbour')[None], dtype=np.int64)
     owner = all_owner[:len(neighbour)]
     boundary = FoamFile(mesh / 'boundary')[None]
     graph_settings = (levels, boundary)
+    if not isinstance(obstacle_layers, (int, np.integer)) or isinstance(obstacle_layers, (bool, np.bool_)) or obstacle_layers < 0:
+        raise ValueError('obstacle_layers must be a nonnegative integer.')
+    if not isinstance(obstacle_patch, str) or not obstacle_patch.strip():
+        raise ValueError('obstacle_patch must be a nonempty patch name.')
+    if obstacle_layers and adaptive_regions is not None:
+        raise ValueError('Obstacle layer protection cannot be combined with adaptive regions.')
+    if obstacle_layers:
+        patches = [patch for name, patch in boundary if name == obstacle_patch]
+        if len(patches) != 1:
+            raise ValueError(f'Obstacle patch {obstacle_patch!r} was not found uniquely in the mesh boundary.')
+        first, count = int(patches[0]['startFace']), int(patches[0]['nFaces'])
+        if first < len(neighbour) or count <= 0 or first + count > len(all_owner):
+            raise ValueError(f'Obstacle patch {obstacle_patch!r} has invalid boundary faces.')
+        graph_settings += (('obstacle_layers', obstacle_patch, obstacle_layers),)
     if adaptive_regions is not None:
         adaptive_regions = validate_adaptive_regions(adaptive_regions)
         if not isinstance(adaptive_extra_levels, int) or isinstance(adaptive_extra_levels, bool) or adaptive_extra_levels < 1:
@@ -164,8 +187,19 @@ def load_mesh_graph(centres, volumes, case_dir, data_dir, levels=3,
                 graph['native_owner'] = owner
                 graph['native_neighbour'] = neighbour
                 print(f"[MESH GRAPH] loaded {len(centres)} -> {graph['coarse_count']} nodes", flush=True)
+                if obstacle_layers:
+                    print(f'[MESH GRAPH] obstacle patch={obstacle_patch} layers={obstacle_layers} '
+                          f'protected cells={int(graph["protected_cell_count"])}', flush=True)
                 return graph, signature
-    if adaptive_regions is None:
+    if obstacle_layers:
+        protected = protected_cells_from_layers(len(centres), owner, neighbour,
+                                                all_owner[first:first + count], obstacle_layers)
+        graph = coarsen_graph(centres, volumes, owner, neighbour, levels,
+                              protected_cells=protected, protect_after=0)
+        graph['protected_cell_count'] = int(protected.sum())
+        print(f'[MESH GRAPH] obstacle patch={obstacle_patch} layers={obstacle_layers} '
+              f'protected cells={graph["protected_cell_count"]}', flush=True)
+    elif adaptive_regions is None:
         graph = coarsen_graph(centres, volumes, owner, neighbour, levels)
     else:
         protected = protected_cells_from_regions(centres, adaptive_regions)

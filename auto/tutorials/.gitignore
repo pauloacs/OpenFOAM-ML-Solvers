@@ -24,6 +24,13 @@ postProcessing/
 DLpimpleFoam_auto/**/ML_data/
 DLpimpleFoam_auto/**/SM_inspect/
 DLpimpleFoam_auto/**/log.*
+DLpisoFoam_auto/**/ML_data/
+DLpisoFoam_auto/**/SM_inspect/
+DLpisoFoam_auto/**/log.*
+DLpisoFoam_auto/**/constant/polyMesh/
+DLpisoFoam_auto/**/0/cellLevel
+DLpisoFoam_auto/**/0/pointLevel
+DLpisoFoam_auto/**/0/yPlus
 DLpimpleFoam_auto/gridded_shift/**/visualize_obstacles.png
 DLpimpleFoam_oracle/**/log.*
 DLpimpleFoam_oracle/confined/system/blockMeshDict

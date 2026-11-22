@@ -40,7 +40,9 @@ def init_func(array, z_top_boundary, z_bot_boundary, y_top_boundary, y_bot_bound
     graph, signature = load_mesh_graph(array[:, 3:6], array[:, 11], Path.cwd(), data_dir,
         int(config.get('graph_levels', 3)),
         adaptive_regions=config.get('graph_adaptive_regions') if adaptive else None,
-        adaptive_extra_levels=int(config.get('graph_adaptive_extra_levels', 1)) if adaptive else 0)
+        adaptive_extra_levels=int(config.get('graph_adaptive_extra_levels', 1)) if adaptive else 0,
+        obstacle_patch=config.get('graph_obstacle_patch', 'obstacle'),
+        obstacle_layers=config.get('graph_obstacle_protection_layers', 0))
     component_head_mismatch = (config.get('velocity_output_mode') == 'shift_source_component'
         and (metadata.get('velocity_shift_correction_factor') != float(config.get('velocity_shift_correction_factor', .25))
              or metadata.get('velocity_shift_correction_weight') != float(config.get('velocity_shift_correction_weight', .05))))

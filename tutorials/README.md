@@ -15,9 +15,9 @@ The solver sources and packages are grouped in `classical/` and `auto/` to
 match these roles. See the [AUTO workflow guide](../auto/README.md) for the
 buoyant AUTO solver's distinct pressure, buoyancy, and flux controls.
 
-## Compact PIMPLE Tutorials
+## Compact AUTO and Oracle Tutorials
 
-The five compact AUTO/oracle cases use the tested PIMPLE integration on a
+The six compact AUTO/oracle cases use the tested PIMPLE or PISO integration on a
 small 512-cell channel with a square obstacle. They contain only text
 inputs: no generated mesh, restart snapshot, dataset, trained weights, or logs.
 Each `Allrun` builds and checks its own mesh.
@@ -28,6 +28,7 @@ Classic solver examples are linked separately in the table below.
 | [AUTO gridded pressure-only](../auto/tutorials/DLpimpleFoam_auto/gridded_shift/pressure_only) | Lattice CNN shifter `ddp` residual; fresh automatic training | Fixed-pressure momentum reconstruction |
 | [AUTO graph pressure-only](../auto/tutorials/DLpimpleFoam_auto/graph_shift/pressure_only) | Mesh-graph shifter `ddp` residual; fresh automatic training | Fixed-pressure momentum reconstruction |
 | [AUTO graph joint](../auto/tutorials/DLpimpleFoam_auto/graph_shift/joint) | Mesh-graph shifter `ddp` and `ddU` residuals; fresh automatic training | Joint state injection, pressure force, then reconstruction |
+| [AUTO PISO graph pressure-only](../auto/tutorials/DLpisoFoam_auto/graph_shift/pressure_only) | Mesh-graph shifter `ddp` residual; fresh automatic training | One momentum predictor, then inner PISO pressure corrections |
 | [Oracle pressure-only](../auto/tutorials/DLpimpleFoam_oracle/pressure_only) | Perfect reference pressure, without interpolation | `rerunUEqnWithOraclePressure` |
 | [Oracle joint](../auto/tutorials/DLpimpleFoam_oracle/joint) | Perfect reference pressure and velocity increments, without interpolation | `pressureForceThenReconstruct` |
 | [Classic DLpisoFoam](../classical/tutorials/DLpisoFoam) | Offline-trained surrogate examples | PISO integration |
@@ -52,6 +53,7 @@ the pressure-only oracle-compatible mode.
 
 ```bash
 wmake auto/source/DLpimpleFoam_auto
+wmake auto/source/DLpisoFoam_auto
 wmake auto/source/DLpimpleFoam_oracle
 wmake auto/source/DLpisoFoam_oracle
 ```

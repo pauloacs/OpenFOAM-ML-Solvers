@@ -454,7 +454,9 @@ def main(argv=None):
         graph, signature = load_mesh_graph(centres, volumes, Path.cwd(), data_dir,
             int(config.get('graph_levels', 3)),
             adaptive_regions=config.get('graph_adaptive_regions') if adaptive else None,
-            adaptive_extra_levels=int(config.get('graph_adaptive_extra_levels', 1)) if adaptive else 0)
+            adaptive_extra_levels=int(config.get('graph_adaptive_extra_levels', 1)) if adaptive else 0,
+            obstacle_patch=config.get('graph_obstacle_patch', 'obstacle'),
+            obstacle_layers=config.get('graph_obstacle_protection_layers', 0))
         if native_enabled:
             from foamlib import FoamFile
             from .native_loss import native_loss_geometry

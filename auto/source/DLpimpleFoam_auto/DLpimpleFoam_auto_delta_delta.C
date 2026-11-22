@@ -77,6 +77,7 @@ int main(int argc, char *argv[])
     {
         Foam::FatalError.exit();
     }
+    const bool pisoAutoMode = args.executable() == "DLpisoFoam_auto";
 
     #include "postProcess.H"
 
@@ -506,6 +507,10 @@ int main(int argc, char *argv[])
         mlDict.lookupOrDefault<Switch>("smUseVelocityExtrapolation", false);
     const scalar smVelocityExtrapolationAlpha =
         mlDict.lookupOrDefault<scalar>("smVelocityExtrapolationAlpha", 1.0);
+    Switch smWarmStartStateReconstruction =
+        mlDict.lookupOrDefault<Switch>("smWarmStartStateReconstruction", false);
+    const scalar smReconstructionWarmStartFactor =
+        mlDict.lookupOrDefault<scalar>("smReconstructionWarmStartFactor", 1.0);
     label smStateReconstructionCorrectors =
         mlDict.lookupOrDefault<label>("smStateReconstructionCorrectors", 1);
     Switch smAdaptiveStateReconstruction =
@@ -531,6 +536,36 @@ int main(int argc, char *argv[])
     scalar smAitkenMaxFactor =
         mlDict.lookupOrDefault<scalar>("smAitkenMaxFactor", 1.8);
 
+    if
+    (
+        pisoAutoMode
+     &&
+        (
+            pimpleSolverDict.lookupOrDefault<label>("nOuterCorrectors", 1) != 1
+         || !smUseInputPredictorState
+         || postSMInjectionReconstruction
+         || smPostInjectionPressureCorrector
+         || smPressureForceThenReconstruct
+         || smOracleCompatibleIntegration
+        )
+    )
+    {
+        FatalErrorInFunction
+            << "DLpisoFoam_auto requires nOuterCorrectors 1, "
+            << "smUseInputPredictorState true, postSMInjectionReconstruction "
+            << "false, smPostInjectionPressureCorrector false, "
+            << "smPressureForceThenReconstruct false, and "
+            << "smOracleCompatibleIntegration false."
+            << exit(FatalError);
+    }
+
+    if (pisoAutoMode)
+    {
+        applySMPressureConsistencyCorrection = false;
+        Info<< "[SM PISO AUTO] one predictor UEqn, direct surrogate injection, "
+            << "then PISO pressure correctors; no post-injection momentum solve." << nl;
+    }
+
     if (smOracleCompatibleIntegration
         && (LTS
             || smOuterUResidualTolerance <= 0 || smOuterPResidualTolerance <= 0
@@ -548,6 +583,34 @@ int main(int argc, char *argv[])
         FatalErrorInFunction
             << "Velocity extrapolation requires a finite nonnegative alpha, transient pressure-only SM, "
             << "and smUseInputPredictorState=false."
+            << exit(FatalError);
+    }
+    if
+    (
+        smWarmStartStateReconstruction
+     &&
+        (
+            !postSMInjectionReconstruction
+         || !smPressureForceThenReconstruct
+         || smStateReconstructionCorrectors < 1
+        )
+    )
+    {
+        FatalErrorInFunction
+            << "smWarmStartStateReconstruction requires post-injection "
+            << "reconstruction, pressure-force-then-reconstruct, and at least "
+            << "one reconstruction corrector."
+            << exit(FatalError);
+    }
+    if
+    (
+        !std::isfinite(smReconstructionWarmStartFactor)
+     || smReconstructionWarmStartFactor < 0
+     || smReconstructionWarmStartFactor > 2
+    )
+    {
+        FatalErrorInFunction
+            << "smReconstructionWarmStartFactor must be finite and in [0, 2]."
             << exit(FatalError);
     }
     if (predictDUOutput && predictDDUCorrOutput)
@@ -598,10 +661,14 @@ int main(int argc, char *argv[])
     }
 
     Info<< "SM post-injection reconstruction="
+        << " pisoAutoMode=" << pisoAutoMode
+        << " postSMInjectionReconstruction="
         << postSMInjectionReconstruction
         << " predictVelocity=" << predictDUOutput
         << " velocityExtrapolation=" << smUseVelocityExtrapolation
         << " velocityExtrapolationAlpha=" << smVelocityExtrapolationAlpha
+        << " warmStartStateReconstruction=" << smWarmStartStateReconstruction
+        << " reconstructionWarmStartFactor=" << smReconstructionWarmStartFactor
         << " pressureForceThenReconstruct=" << smPressureForceThenReconstruct
         << " postInjectionPressureCorrector=" << smPostInjectionPressureCorrector
         << " pressureCorrectorPosition=" << smPostInjectionPressureCorrectorPosition
@@ -620,6 +687,42 @@ int main(int argc, char *argv[])
     {
         Info<< "[SM DIRECT] postSMInjectionReconstruction=false: pressure-force stage is disabled." << nl;
     }
+
+    volVectorField smReconstructionWarmStartU
+    (
+        IOobject
+        (
+            "smReconstructionWarmStartU",
+            runTime.timeName(),
+            mesh,
+            smWarmStartStateReconstruction
+                ? IOobject::READ_IF_PRESENT : IOobject::NO_READ,
+            smWarmStartStateReconstruction
+                ? IOobject::AUTO_WRITE : IOobject::NO_WRITE
+        ),
+        mesh,
+        dimensionedVector
+        (
+            "smReconstructionWarmStartU",
+            U.dimensions(),
+            vector::zero
+        )
+    );
+
+    surfaceScalarField smReconstructionWarmStartPhi
+    (
+        IOobject
+        (
+            "smReconstructionWarmStartPhi",
+            runTime.timeName(),
+            mesh,
+            smWarmStartStateReconstruction
+                ? IOobject::READ_IF_PRESENT : IOobject::NO_READ,
+            smWarmStartStateReconstruction
+                ? IOobject::AUTO_WRITE : IOobject::NO_WRITE
+        ),
+        phi - phi
+    );
 
     std::set<std::string> sampleFields;
     if (pythonModuleRead && !pythonInputFlags.empty())
@@ -865,6 +968,16 @@ int main(int argc, char *argv[])
             }
 
             pimple.read();
+            if
+            (
+                pisoAutoMode
+             && pimpleSolverDict.lookupOrDefault<label>("nOuterCorrectors", 1) != 1
+            )
+            {
+                FatalErrorInFunction
+                    << "PIMPLE_SM cannot change nOuterCorrectors in DLpisoFoam_auto."
+                    << exit(FatalError);
+            }
             pimpleSMOverridesApplied = true;
         }
         else
@@ -1255,6 +1368,54 @@ int main(int argc, char *argv[])
                         runPostInjectionPressureCorrector();
                     }
 
+                    autoPtr<volVectorField> reconstructionWarmStartBaseU;
+                    autoPtr<surfaceScalarField> reconstructionWarmStartBasePhi;
+                    if (smWarmStartStateReconstruction)
+                    {
+                        reconstructionWarmStartBaseU.reset
+                        (
+                            new volVectorField
+                            (
+                                IOobject
+                                (
+                                    "smReconstructionWarmStartBaseU",
+                                    runTime.timeName(), mesh,
+                                    IOobject::NO_READ, IOobject::NO_WRITE, false
+                                ),
+                                U
+                            )
+                        );
+                        reconstructionWarmStartBasePhi.reset
+                        (
+                            new surfaceScalarField
+                            (
+                                IOobject
+                                (
+                                    "smReconstructionWarmStartBasePhi",
+                                    runTime.timeName(), mesh,
+                                    IOobject::NO_READ, IOobject::NO_WRITE, false
+                                ),
+                                phi
+                            )
+                        );
+                    }
+                    if
+                    (
+                        smWarmStartStateReconstruction
+                     && smReconstructionWarmStartFactor > 0
+                    )
+                    {
+                        U += smReconstructionWarmStartFactor
+                           *smReconstructionWarmStartU;
+                        phi += smReconstructionWarmStartFactor
+                             *smReconstructionWarmStartPhi;
+                        U.correctBoundaryConditions();
+                        fvOptions.correct(U);
+                        Info<< "[SM RECONSTRUCTION] applied previous-step "
+                            << "warm start factor="
+                            << smReconstructionWarmStartFactor << nl;
+                    }
+
                     // Mimic the realistic oracle mode:
                     // first UEqn -> inject SM pressure only -> fixed-pressure
                     // U/phi reconstruction -> normal PIMPLE continuation.
@@ -1495,6 +1656,16 @@ int main(int argc, char *argv[])
                         Info<< "[SM RECONSTRUCTION] zero fixed-pressure correctors; no reconstruction UEqn solve." << nl;
                     }
 
+                    if (smWarmStartStateReconstruction)
+                    {
+                        smReconstructionWarmStartU =
+                            U - reconstructionWarmStartBaseU();
+                        smReconstructionWarmStartPhi =
+                            phi - reconstructionWarmStartBasePhi();
+                        Info<< "[SM RECONSTRUCTION] stored warm start for "
+                            << "next timestep" << nl;
+                    }
+
                     if (smPostInjectionPressureCorrector
                         && smPostInjectionPressureCorrectorPosition == "afterReconstruction")
                     {
@@ -1577,7 +1748,7 @@ int main(int argc, char *argv[])
                 ).count();
                 counter++;
                 smLastPressureResidual = smFirstResidualSince<scalar>(mesh, p.name(), firstPressureSolve);
-                if (smOracleCompatibleIntegration && smAdaptivePressureCorrectors
+                if ((smOracleCompatibleIntegration || pisoAutoMode) && smAdaptivePressureCorrectors
                     && counter >= smMinPressureCorrectors && smLastPressureResidual < smPressureCorrectorTolerance)
                 {
                     break;

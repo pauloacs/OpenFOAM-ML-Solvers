@@ -8,8 +8,10 @@ potential; it does not train or load a surrogate.
 ## Current Components
 
 - `tutorials/DLpimpleFoam_auto/`: gridded pressure-only and graph pressure-only/joint cases.
+- `tutorials/DLpisoFoam_auto/`: compact single-outer AUTO PISO case.
 - `tutorials/DLpimpleFoam_oracle/`: compact and mesh-generated reference-injection cases.
 - `source/DLpimpleFoam_auto/`: self-training OpenFOAM solver.
+- `source/DLpisoFoam_auto/`: single-outer AUTO PISO build sharing AUTO sampling and training sources.
 - `source/DLbuoyantPimpleFoam_auto/`: buoyant, heat-transfer AUTO solver.
 - `source/DLpimpleFoam_oracle/`: oracle diagnostic solver.
 - `source/DLpisoFoam_oracle/`: PISO oracle build using the shared oracle implementation.
@@ -132,6 +134,57 @@ Use boxes around obstacles and their downstream wakes. Adaptive settings are
 part of the graph signature, so train a new model for the selected regions and
 levels; existing uniform-graph weights are not interchangeable.
 
+### Obstacle-Layer Protection
+
+To match the oracle's level-2 graph with 15 protected obstacle layers, set
+these options in the case's `python_module.py`:
+
+```python
+graph_levels = 2
+graph_obstacle_patch = 'obstacle'
+graph_obstacle_protection_layers = 15
+```
+
+Layer 1 is the patch's owner cells; each additional layer adds face-adjacent
+cells. Protected cells remain individual nodes at every coarsening level.
+The default layer count is zero. This option cannot be combined with adaptive
+box coarsening. Protection settings are part of the graph signature: use a
+fresh data folder and train a model for the selected mesh and settings.
+Training and inference print the protected-cell and graph-node counts. On a
+small or tightly confined mesh, 15 layers may cover most or all cells; select
+the layer count based on the geometry and the graph size you can afford.
+
+After installing the graph backend, run its focused protection tests from the
+repository root:
+
+```bash
+python3 -m unittest discover -s auto/packages/pressure_SM_mesh_graph/_3D/CFD_usable/tests -p 'test_obstacle_layers.py' -v
+```
+
+## AUTO PISO Integration
+
+`DLpisoFoam_auto` shares the AUTO sampling and training pipeline, but uses
+one momentum predictor followed by direct surrogate injection and inner PISO
+pressure corrections. It selects this path by executable name. In
+`system/fvSolution`, set `PIMPLE/nOuterCorrectors` to `1` and choose the
+maximum number of pressure correctors with `PIMPLE/nCorrectors`. In
+`system/MLSamplingDict`, use:
+
+```text
+smUseInputPredictorState true;
+postSMInjectionReconstruction false;
+smPostInjectionPressureCorrector false;
+smPressureForceThenReconstruct false;
+smOracleCompatibleIntegration false;
+smWarmStartStateReconstruction false;
+```
+
+`smAdaptivePressureCorrectors`, `smMinPressureCorrectors`, and
+`smPressureCorrectorTolerance` control optional early stopping in the inner
+loop. The [PISO tutorial](tutorials/DLpisoFoam_auto/graph_shift/pressure_only)
+provides a complete pressure-only example. Joint graph models can also return
+velocity increments, but require a model trained for that output.
+
 ## Graph Slice Images
 
 With `plot_training=True`, mesh-graph training exports every sample in the
@@ -169,12 +222,17 @@ Run builds from the repository root:
 
 ```bash
 wmake auto/source/DLpimpleFoam_auto
+wmake auto/source/DLpisoFoam_auto
 wmake auto/source/DLbuoyantPimpleFoam_auto
 wmake auto/source/DLpimpleFoam_oracle
 wmake auto/source/DLpisoFoam_oracle
 cd auto/tutorials/DLpimpleFoam_auto/graph_shift/pressure_only
 bash Allrun
 ```
+
+For AUTO PISO, use `auto/tutorials/DLpisoFoam_auto/graph_shift/pressure_only`
+and run `bash Allrun` there. It shares the AUTO sampling/training pipeline
+but uses one momentum predictor followed by inner PISO pressure corrections.
 
 The AUTO case's `python_module.py` selects the model and features;
 `system/MLSamplingDict` controls sampling, training, and activation. Start with
