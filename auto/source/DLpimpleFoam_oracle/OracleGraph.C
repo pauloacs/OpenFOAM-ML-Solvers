@@ -493,11 +493,43 @@ void OracleGraphLinearTransfer::linearRoundTrip
     values = result;
 }
 
+void OracleGraphLinearTransfer::linearRoundTrip
+(
+    Field<vector>& values
+) const
+{
+    if (values.size() != mapping_.size())
+    {
+        FatalErrorInFunction
+            << "Graph velocity field size does not match native mesh."
+            << exit(FatalError);
+    }
+
+    for (label component = 0; component < vector::nComponents; ++component)
+    {
+        scalarField componentValues(values.size(), 0);
+        forAll(values, celli)
+        {
+            componentValues[celli] = values[celli][component];
+        }
+
+        linearRoundTrip(componentValues);
+
+        forAll(values, celli)
+        {
+            values[celli][component] = componentValues[celli];
+        }
+    }
+}
+
 labelList oracleGraphCoarsen
 (
     const polyMesh& mesh,
     const label levels,
-    label& coarseCount
+    label& coarseCount,
+    const word& obstaclePatch,
+    const label obstacleProtectionLayers,
+    label& protectedCellCount
 )
 {
     if (levels < 0)
@@ -506,8 +538,15 @@ labelList oracleGraphCoarsen
             << "graphCoarseningLevels must be non-negative."
             << exit(FatalError);
     }
+    if (obstacleProtectionLayers < 0)
+    {
+        FatalErrorInFunction
+            << "graphObstacleProtectionLayers must be non-negative."
+            << exit(FatalError);
+    }
 
     const label nCells = mesh.nCells();
+    protectedCellCount = 0;
     std::vector<std::pair<label, label>> edges;
     edges.reserve(mesh.nInternalFaces());
     const labelUList& owner = mesh.faceOwner();
@@ -528,12 +567,83 @@ labelList oracleGraphCoarsen
     std::sort(edges.begin(), edges.end());
     edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
 
+    labelList nativeProtectedCells(nCells, 0);
+    std::vector<label> obstacleFrontier;
+    if (obstacleProtectionLayers > 0)
+    {
+        const label patchId = mesh.boundaryMesh().findPatchID(obstaclePatch);
+        if (patchId < 0)
+        {
+            FatalErrorInFunction
+                << "graphObstaclePatch '" << obstaclePatch
+                << "' was not found in the mesh boundary."
+                << exit(FatalError);
+        }
+
+        std::vector<std::vector<label>> cellNeighbours(nCells);
+        for (const auto& edge : edges)
+        {
+            cellNeighbours[edge.first].push_back(edge.second);
+            cellNeighbours[edge.second].push_back(edge.first);
+        }
+
+        const polyPatch& patch = mesh.boundaryMesh()[patchId];
+        for
+        (
+            label facei = patch.start();
+            facei < patch.start() + patch.size();
+            ++facei
+        )
+        {
+            const label celli = mesh.faceOwner()[facei];
+            if (!nativeProtectedCells[celli])
+            {
+                nativeProtectedCells[celli] = 1;
+                obstacleFrontier.push_back(celli);
+            }
+        }
+        if (obstacleFrontier.empty())
+        {
+            FatalErrorInFunction
+                << "graphObstaclePatch '" << obstaclePatch
+                << "' has no owner cells to protect."
+                << exit(FatalError);
+        }
+
+        for
+        (
+            label layer = 1;
+            layer < obstacleProtectionLayers;
+            ++layer
+        )
+        {
+            std::vector<label> nextFrontier;
+            for (const label celli : obstacleFrontier)
+            {
+                for (const label adjacent : cellNeighbours[celli])
+                {
+                    if (!nativeProtectedCells[adjacent])
+                    {
+                        nativeProtectedCells[adjacent] = 1;
+                        nextFrontier.push_back(adjacent);
+                    }
+                }
+            }
+            obstacleFrontier.swap(nextFrontier);
+        }
+        forAll(nativeProtectedCells, celli)
+        {
+            protectedCellCount += nativeProtectedCells[celli] != 0;
+        }
+    }
+
     labelList mapping(nCells);
     forAll(mapping, celli)
     {
         mapping[celli] = celli;
     }
     coarseCount = nCells;
+    labelList protectedCoarseNodes(nativeProtectedCells);
 
     for (label level = 0; level < levels; ++level)
     {
@@ -572,6 +682,7 @@ labelList oracleGraphCoarsen
         );
 
         labelList localMapping(coarseCount, -1);
+        labelList nextProtectedCoarseNodes(coarseCount, 0);
         label nextCoarseCount = 0;
         for (const label node : order)
         {
@@ -581,10 +692,21 @@ labelList oracleGraphCoarsen
             }
 
             localMapping[node] = nextCoarseCount;
+            nextProtectedCoarseNodes[nextCoarseCount] =
+                protectedCoarseNodes[node];
+            if (protectedCoarseNodes[node])
+            {
+                nextCoarseCount++;
+                continue;
+            }
             for (label edgei = offsets[node]; edgei < offsets[node + 1]; ++edgei)
             {
                 const label adjacent = directed[edgei].second;
-                if (localMapping[adjacent] < 0)
+                if
+                (
+                    localMapping[adjacent] < 0
+                 && !protectedCoarseNodes[adjacent]
+                )
                 {
                     localMapping[adjacent] = nextCoarseCount;
                     break;
@@ -621,6 +743,8 @@ labelList oracleGraphCoarsen
         );
         edges.swap(coarseEdges);
         coarseCount = nextCoarseCount;
+        nextProtectedCoarseNodes.setSize(nextCoarseCount);
+        protectedCoarseNodes = nextProtectedCoarseNodes;
     }
 
     return mapping;

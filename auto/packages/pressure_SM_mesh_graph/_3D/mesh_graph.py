@@ -83,6 +83,32 @@ def protected_cells_from_regions(centres, regions):
     return protected
 
 
+def protected_cells_from_layers(cell_count, owner, neighbour, seed_cells, layers):
+    if not isinstance(layers, (int, np.integer)) or isinstance(layers, (bool, np.bool_)) or layers < 0:
+        raise ValueError('Obstacle protection layers must be a nonnegative integer.')
+    protected = np.zeros(cell_count, dtype=bool)
+    if not layers:
+        return protected
+    seeds = np.asarray(seed_cells, dtype=np.int64)
+    if seeds.ndim != 1 or not len(seeds) or np.any(seeds < 0) or np.any(seeds >= cell_count):
+        raise ValueError('Obstacle patch must have valid owner cells.')
+    owner = np.asarray(owner, dtype=np.int64)
+    neighbour = np.asarray(neighbour, dtype=np.int64)
+    if (owner.shape != neighbour.shape or np.any(owner < 0) or np.any(neighbour < 0)
+            or np.any(owner >= cell_count) or np.any(neighbour >= cell_count)):
+        raise ValueError('Invalid internal-face owner/neighbour arrays.')
+    adjacency = sparse.csr_matrix((np.ones(2 * len(owner)),
+                                   (np.concatenate((owner, neighbour)), np.concatenate((neighbour, owner)))),
+                                  shape=(cell_count, cell_count))
+    frontier = np.unique(seeds)
+    protected[frontier] = True
+    for _layer in range(1, layers):
+        frontier = np.unique(adjacency[frontier].indices)
+        frontier = frontier[~protected[frontier]]
+        protected[frontier] = True
+    return protected
+
+
 def coarsen_graph(centres, volumes, owner, neighbour, levels=3,
                   protected_cells=None, protect_after=None):
     centres = np.asarray(centres, dtype=np.float64)

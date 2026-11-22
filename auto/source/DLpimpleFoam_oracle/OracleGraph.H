@@ -10,7 +10,10 @@ labelList oracleGraphCoarsen
 (
     const polyMesh& mesh,
     const label levels,
-    label& coarseCount
+    label& coarseCount,
+    const word& obstaclePatch,
+    const label obstacleProtectionLayers,
+    label& protectedCellCount
 );
 
 template<class Type>
@@ -82,6 +85,7 @@ public:
     );
 
     void linearRoundTrip(Field<scalar>& values) const;
+    void linearRoundTrip(Field<vector>& values) const;
 };
 
 }
